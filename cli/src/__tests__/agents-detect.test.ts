@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const { existsSyncMock } = vi.hoisted(() => ({
   existsSyncMock: vi.fn((_path?: string) => false),
@@ -9,7 +11,7 @@ vi.mock("node:fs", async () => {
   return { ...actual, existsSync: existsSyncMock };
 });
 
-import { detectAgents, AGENTS, DEFAULT_MODEL, type AgentDef, type AgentProtocol } from "../agents-detect.js";
+import { detectAgents, resolveZcodeBin, AGENTS, DEFAULT_MODEL, type AgentDef, type AgentProtocol } from "../agents-detect.js";
 
 function findAgent(
   agents: ReturnType<typeof detectAgents>,
@@ -25,9 +27,22 @@ beforeEach(() => {
   existsSyncMock.mockReturnValue(false);
 });
 
+// Real value captured once at module load; restore after each platform-stubbing
+// test so later tests run against the host platform again.
+const REAL_PLATFORM = process.platform;
 afterEach(() => {
   vi.unstubAllEnvs();
+  Object.defineProperty(process, "platform", {
+    value: REAL_PLATFORM,
+    configurable: true,
+  });
 });
+
+// ZCode install discovery probes platform-specific absolute paths. Stub the
+// platform so a single host (win32 here) can exercise the macOS/Linux branches.
+function stubPlatform(p: NodeJS.Platform) {
+  Object.defineProperty(process, "platform", { value: p, configurable: true });
+}
 
 describe("detectAgents", () => {
   describe("*_BIN env override with absolute path that exists", () => {
@@ -378,6 +393,118 @@ describe("detectAgents", () => {
       ] as const) {
         expect(protocols.has(expected)).toBe(true);
       }
+    });
+  });
+
+  // T3: ZCode install discovery. Only the discovery function is under test;
+  // ZCode is NOT yet registered in AGENTS (registration lands in T7). Cases
+  // follow the same existsSync-mock pattern as the detectAgents tests above.
+  describe("resolveZcodeBin", () => {
+    it("ZCODE_BIN absolute path that exists wins over all defaults (win32)", () => {
+      vi.stubEnv("ZCODE_BIN", "C:\\custom\\zcode.cjs");
+      stubPlatform("win32");
+      existsSyncMock.mockImplementation((p) => p === "C:\\custom\\zcode.cjs");
+
+      expect(resolveZcodeBin()).toBe("C:\\custom\\zcode.cjs");
+    });
+
+    it("ZCODE_BIN command name resolves on PATH when not an absolute path", () => {
+      const dir = "/opt/zcode-shim";
+      const expected = join(dir, "my-zcode");
+      vi.stubEnv("ZCODE_BIN", "my-zcode");
+      vi.stubEnv("PATH", dir);
+      stubPlatform("linux");
+      // Absolute lookup misses; only the PATH-resolved location exists.
+      existsSyncMock.mockImplementation((p) => p === expected);
+
+      expect(resolveZcodeBin()).toBe(expected);
+    });
+
+    it("Windows: ZCODE_WINDOWS_APP_INSTALL_DIR .cjs path probed", () => {
+      vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "D:\\ZCode");
+      stubPlatform("win32");
+      existsSyncMock.mockImplementation(
+        (p) => p === "D:\\ZCode\\resources\\glm\\zcode.cjs",
+      );
+
+      expect(resolveZcodeBin()).toBe(
+        "D:\\ZCode\\resources\\glm\\zcode.cjs",
+      );
+    });
+
+    it("Windows: falls back to C:\\Program Files\\ZCode when install-dir unset", () => {
+      stubPlatform("win32");
+      existsSyncMock.mockImplementation(
+        (p) => p === "C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs",
+      );
+
+      expect(resolveZcodeBin()).toBe(
+        "C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs",
+      );
+    });
+
+    it("Windows: install-dir env is preferred over the Program Files fallback", () => {
+      vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "D:\\ZCode");
+      stubPlatform("win32");
+      existsSyncMock.mockImplementation((p) =>
+        p === "D:\\ZCode\\resources\\glm\\zcode.cjs"
+          ? true
+          : p === "C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs",
+      );
+
+      expect(resolveZcodeBin()).toBe(
+        "D:\\ZCode\\resources\\glm\\zcode.cjs",
+      );
+    });
+
+    it("macOS: probes /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs", () => {
+      stubPlatform("darwin");
+      existsSyncMock.mockImplementation(
+        (p) =>
+          p ===
+          "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+      );
+
+      expect(resolveZcodeBin()).toBe(
+        "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+      );
+    });
+
+    it("Linux: probes ~/Applications/ZCode.AppImage", () => {
+      stubPlatform("linux");
+      const expected = `${homedir()}/Applications/ZCode.AppImage`;
+      existsSyncMock.mockImplementation((p) => p === expected);
+
+      expect(resolveZcodeBin()).toBe(expected);
+    });
+
+    it("Linux: `zcode` on PATH is found before the AppImage default", () => {
+      const dir = "/opt/zcode-deb";
+      const expected = join(dir, "zcode");
+      vi.stubEnv("PATH", dir);
+      stubPlatform("linux");
+      existsSyncMock.mockImplementation((p) => p === expected);
+
+      expect(resolveZcodeBin()).toBe(expected);
+    });
+
+    it("returns null when nothing is found (no throw)", () => {
+      stubPlatform("darwin");
+      existsSyncMock.mockReturnValue(false);
+
+      expect(resolveZcodeBin()).toBeNull();
+    });
+
+    it("ZCODE_BIN override takes precedence over a present platform default", () => {
+      vi.stubEnv("ZCODE_BIN", "/opt/zcode/override.cjs");
+      stubPlatform("linux");
+      existsSyncMock.mockImplementation(
+        (p) =>
+          p === "/opt/zcode/override.cjs" ||
+          p === "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+      );
+
+      expect(resolveZcodeBin()).toBe("/opt/zcode/override.cjs");
     });
   });
 });

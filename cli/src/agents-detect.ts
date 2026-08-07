@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import path, { delimiter, join } from "node:path";
+import path, { delimiter, join, posix, win32 } from "node:path";
 
 /**
  * Agent detection — adapted from next/src/lib/agents/detect.ts
@@ -363,6 +363,71 @@ export function resolveOnPath(bin: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Locate the ZCode CLI binary. Probe order, first match wins (see
+ * CONTEXT.md → "ZCode install discovery"):
+ *   1. `ZCODE_BIN` env var — user override (absolute path, else PATH lookup)
+ *   2. `zcode` on PATH (Linux `.deb`/AUR; rarely present on Windows/macOS)
+ *   3. Platform default install path of the `zcode.cjs` bundle:
+ *        Windows : `%ZCODE_WINDOWS_APP_INSTALL_DIR%\resources\glm\zcode.cjs`
+ *                  → `C:\Program Files\ZCode\resources\glm\zcode.cjs`
+ *        macOS   : `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`
+ *        Linux   : `~/Applications/ZCode.AppImage` (AppImage mounts the .cjs)
+ *
+ * Discovery only — registering ZCode in the `AGENTS` array is T7. Returns
+ * `null` (never throws) when nothing is found.
+ */
+export function resolveZcodeBin(): string | null {
+  const env = process.env;
+  // 1. Explicit user override.
+  const override = env.ZCODE_BIN?.trim();
+  if (override) {
+    if (existsSync(override)) return override;
+    const onPath = resolveOnPath(override);
+    if (onPath) return onPath;
+  }
+  // 2. `zcode` registered on PATH (Linux `.deb`/AUR packages do this).
+  const pathHit = resolveOnPath("zcode");
+  if (pathHit) return pathHit;
+  // 3. Platform default install path of the `.cjs` bundle.
+  for (const candidate of defaultZcodeCjsPaths()) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Per-platform candidate default paths for ZCode's `zcode.cjs`. Exported only
+ * so tests can assert the exact paths probed; callers should use
+ * `resolveZcodeBin()`.
+ *
+ * macOS/Linux paths are built with `posix` separators so they stay
+ * forward-slash regardless of the *host* running the probe — these are
+ * spec-fixed install locations (see CONTEXT.md → "ZCode install discovery")
+ * and must not be rewritten when the host is, say, Windows running a
+ * cross-platform unit test. Windows paths keep backslash separators.
+ */
+export function defaultZcodeCjsPaths(): string[] {
+  const platform = process.platform;
+  const env = process.env;
+  if (platform === "win32") {
+    const installDir = env.ZCODE_WINDOWS_APP_INSTALL_DIR?.trim();
+    const out: string[] = [];
+    if (installDir) {
+      out.push(win32.join(installDir, "resources", "glm", "zcode.cjs"));
+    }
+    out.push(
+      win32.join("C:\\Program Files\\ZCode", "resources", "glm", "zcode.cjs"),
+    );
+    return out;
+  }
+  if (platform === "darwin") {
+    return [posix.join("/Applications/ZCode.app", "Contents", "Resources", "glm", "zcode.cjs")];
+  }
+  // Linux: AppImage has the `.cjs` mounted inside.
+  return [posix.join(homedir(), "Applications", "ZCode.AppImage")];
 }
 
 export type DetectedAgent = {
