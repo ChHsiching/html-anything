@@ -5,7 +5,11 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": "./dist/zcode-config.js"
+    ".": "./dist/zcode-config.js",
+    "./zcode-config": "./dist/zcode-config.js",
+    "./zcode-protocol": "./dist/zcode-protocol.js",
+    "./zcode-stream": "./dist/zcode-stream.js",
+    "./zcode-session": "./dist/zcode-session.js"
   },
   "main": "./dist/zcode-config.js",
   "types": "./dist/zcode-config.d.ts",
