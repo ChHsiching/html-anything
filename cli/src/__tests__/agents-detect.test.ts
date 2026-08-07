@@ -9,7 +9,7 @@ vi.mock("node:fs", async () => {
   return { ...actual, existsSync: existsSyncMock };
 });
 
-import { detectAgents } from "../agents-detect.js";
+import { detectAgents, AGENTS, DEFAULT_MODEL, type AgentDef, type AgentProtocol } from "../agents-detect.js";
 
 function findAgent(
   agents: ReturnType<typeof detectAgents>,
@@ -323,6 +323,60 @@ describe("detectAgents", () => {
 
       for (const agent of agents) {
         expect(agent.models.length).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  describe("type-only extension surface (T2)", () => {
+    it("AgentProtocol accepts \"app-server\"", () => {
+      // Compile-time proof: if the union lacks "app-server" this assignment
+      // fails typecheck. The runtime echo just keeps the test meaningful.
+      const p: AgentProtocol = "app-server";
+      expect(p).toBe("app-server");
+    });
+
+    it("AgentDef accepts optional binArgs?: string[]", () => {
+      // Compile-time proof of the new optional field. Omitting it must also
+      // stay valid (every existing AgentDef entry omits it).
+      const withBinArgs: AgentDef = {
+        id: "type-probe",
+        label: "Type Probe",
+        bin: "type-probe",
+        vendor: "probe",
+        protocol: "app-server",
+        binArgs: ["<resolved-cjs-path>", "app-server"],
+        fallbackModels: [DEFAULT_MODEL],
+      };
+      expect(withBinArgs.binArgs).toEqual([
+        "<resolved-cjs-path>",
+        "app-server",
+      ]);
+    });
+
+    it("AgentDef.binArgs is optional (existing entries omit it)", () => {
+      // Every shipped agent omits binArgs — the field must remain optional so
+      // existing AgentDef literals keep typechecking unchanged. Check the whole
+      // array, not a sample, so a future entry that accidentally sets a
+      // required-looking binArgs is caught here.
+      for (const def of AGENTS) {
+        expect(def.binArgs).toBeUndefined();
+      }
+    });
+
+    it("detectAgents stays green across the existing protocol set", () => {
+      // Regression guard: the new "app-server" union member must not flip the
+      // unsupported flag for any of the protocols already in use.
+      existsSyncMock.mockReturnValue(false);
+      const agents = detectAgents();
+      const protocols = new Set(agents.map((a) => a.protocol));
+      for (const expected of [
+        "stdin",
+        "argv",
+        "argv-message",
+        "acp",
+        "pi-rpc",
+      ] as const) {
+        expect(protocols.has(expected)).toBe(true);
       }
     });
   });

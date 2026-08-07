@@ -15,8 +15,13 @@ import path, { delimiter, join } from "node:path";
  *                      the user sees install instructions, but invoke emits a
  *                      clear error pointing them to a supported agent.
  *   - "pi-rpc"       : pi's custom JSON-RPC mode. Same status as "acp".
+ *   - "app-server"   : ZCode's `app-server` JSON-RPC-over-stdio protocol
+ *                      (workspace/* + session/* methods). Distinct from "acp":
+ *                      do not assume a shared parser. Surfaced in detection so
+ *                      ZCode shows up in the picker; the invoke branch lands in
+ *                      a later ticket (see ADR-0002 decision 2).
  */
-export type AgentProtocol = "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc";
+export type AgentProtocol = "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc" | "app-server";
 
 export type ModelOption = { id: string; label: string };
 
@@ -32,6 +37,14 @@ export type AgentDef = {
   vendor: string;
   /** Defaults to "stdin" when omitted. */
   protocol?: AgentProtocol;
+  /**
+   * Extra leading argv spliced between the bin and the protocol argv. Needed
+   * for node-script CLIs (e.g. ZCode's `zcode.cjs`) that must be spawned as
+   * `node <resolvedCjsPath> app-server` rather than as a standalone exec.
+   * Optional and defaults to absent, so existing adapters are unaffected.
+   * See ADR-0002 decision 3.
+   */
+  binArgs?: string[];
   /**
    * Curated, evidence-based model list shown in the picker. Always begins
    * with `DEFAULT_MODEL` (= no `--model` flag → user's CLI config wins).

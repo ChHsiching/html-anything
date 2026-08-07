@@ -6,7 +6,21 @@ import path, { delimiter, join } from "node:path";
  * Agent detection — adapted from next/src/lib/agents/detect.ts
  */
 
-export type AgentProtocol = "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc";
+/**
+ * Per-agent invocation protocol. Determines how `invokeAgent` delivers the
+ * prompt and parses output:
+ *   - "stdin"        : pipe prompt → child stdin, parse stdout via parseLine
+ *   - "argv"         : pass prompt as positional argv (deepseek-tui/codewhale)
+ *   - "argv-message" : prompt goes via `--message <text>` (openclaw)
+ *   - "acp"          : ACP JSON-RPC over stdio (hermes/kimi/devin/kiro/kilo/vibe)
+ *   - "pi-rpc"       : pi's custom JSON-RPC mode
+ *   - "app-server"   : ZCode's `app-server` JSON-RPC-over-stdio protocol
+ *                      (workspace/* + session/* methods). Distinct from "acp":
+ *                      do not assume a shared parser. Surfaced in detection so
+ *                      ZCode shows up in the picker; the invoke branch lands in
+ *                      a later ticket (see ADR-0002 decision 2).
+ */
+export type AgentProtocol = "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc" | "app-server";
 
 export type ModelOption = { id: string; label: string };
 
@@ -20,6 +34,14 @@ export type AgentDef = {
   envOverride?: string;
   vendor: string;
   protocol?: AgentProtocol;
+  /**
+   * Extra leading argv spliced between the bin and the protocol argv. Needed
+   * for node-script CLIs (e.g. ZCode's `zcode.cjs`) that must be spawned as
+   * `node <resolvedCjsPath> app-server` rather than as a standalone exec.
+   * Optional and defaults to absent, so existing adapters are unaffected.
+   * See ADR-0002 decision 3.
+   */
+  binArgs?: string[];
   fallbackModels: ModelOption[];
 };
 
