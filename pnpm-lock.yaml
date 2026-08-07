@@ -13,6 +13,10 @@ importers:
         version: 4.22.1
 
   cli:
+    dependencies:
+      '@html-anything/zcode-protocol':
+        specifier: workspace:*
+        version: link:../packages/zcode-protocol
     devDependencies:
       '@types/node':
         specifier: ^20
