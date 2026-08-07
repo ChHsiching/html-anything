@@ -2,14 +2,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const { existsSyncMock } = vi.hoisted(() => ({
+const { existsSyncMock, readZcodeConfigMock } = vi.hoisted(() => ({
   existsSyncMock: vi.fn((_path?: string) => false),
+  readZcodeConfigMock: vi.fn((): unknown => null),
 }));
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return { ...actual, existsSync: existsSyncMock };
 });
+
+// ZCode's fallbackModels come from the saved provider config (T1). The detect
+// module reads it via @html-anything/zcode-protocol/zcode-config; mock it here
+// so tests can drive the "saved config present" vs "absent" branches without
+// touching the real ~/.zcode/v2 store.
+vi.mock("@html-anything/zcode-protocol/zcode-config", () => ({
+  readZcodeConfig: readZcodeConfigMock,
+}));
 
 import { detectAgents, resolveZcodeBin, AGENTS, DEFAULT_MODEL, type AgentDef, type AgentProtocol } from "../agents-detect.js";
 
@@ -25,6 +34,8 @@ function findAgent(
 beforeEach(() => {
   existsSyncMock.mockReset();
   existsSyncMock.mockReturnValue(false);
+  readZcodeConfigMock.mockReset();
+  readZcodeConfigMock.mockReturnValue(null);
 });
 
 // Real value captured once at module load; restore after each platform-stubbing
@@ -369,13 +380,17 @@ describe("detectAgents", () => {
     });
 
     it("AgentDef.binArgs is optional (existing entries omit it)", () => {
-      // Every shipped agent omits binArgs — the field must remain optional so
-      // existing AgentDef literals keep typechecking unchanged. Check the whole
-      // array, not a sample, so a future entry that accidentally sets a
-      // required-looking binArgs is caught here.
+      // binArgs stays optional so existing AgentDef literals keep typechecking
+      // unchanged. Check the whole array, not a sample, so a future entry that
+      // accidentally sets a required-looking binArgs is caught here. ZCode
+      // (T7) is the one intentional exception — its node-script spawn needs it.
       for (const def of AGENTS) {
+        if (def.id === "zcode") continue;
         expect(def.binArgs).toBeUndefined();
       }
+      expect(
+        AGENTS.find((a) => a.id === "zcode")?.binArgs,
+      ).toEqual(["<resolved-zcode-cjs>", "app-server"]);
     });
 
     it("detectAgents stays green across the existing protocol set", () => {
@@ -505,6 +520,97 @@ describe("detectAgents", () => {
       );
 
       expect(resolveZcodeBin()).toBe("/opt/zcode/override.cjs");
+    });
+  });
+
+  // T7: ZCode is registered as a first-class agent. Unlike the *_BIN/PATH
+  // agents, ZCode's availability is driven by resolveZcodeBin() (its CLI is a
+  // .cjs bundle, not a standalone exec found on PATH), and its fallbackModels
+  // come from the saved provider config (T1). protocol "app-server" is
+  // implemented (T5/T6), so it must NOT be marked unsupported.
+  describe("ZCode agent registration (T7)", () => {
+    it("AGENTS contains a zcode entry with the spec fields", () => {
+      const def = AGENTS.find((a) => a.id === "zcode");
+      expect(def).toBeDefined();
+      expect(def!.label).toBe("ZCode");
+      expect(def!.vendor).toBe("Z.AI");
+      expect(def!.envOverride).toBe("ZCODE_BIN");
+      expect(def!.protocol).toBe("app-server");
+      expect(def!.bin).toBe("node");
+      // ADR-0002 decision 3: binArgs carries the node-script leading argv.
+      // The <resolved-zcode-cjs> placeholder is filled at detect time from
+      // resolveZcodeBin(); the literal here is the sentinel on the AgentDef.
+      expect(def!.binArgs).toEqual(["<resolved-zcode-cjs>", "app-server"]);
+    });
+
+    it("detectAgents() returns available=true when resolveZcodeBin() hits", () => {
+      vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
+      stubPlatform("linux");
+      existsSyncMock.mockImplementation((p) => p === "/opt/zcode/zcode.cjs");
+
+      const agents = detectAgents();
+      const zcode = findAgent(agents, "zcode");
+
+      expect(zcode.available).toBe(true);
+      expect(zcode.path).toBe("/opt/zcode/zcode.cjs");
+      // Spawned as `node <cjs> app-server`: resolvedBin is the node bin.
+      expect(zcode.resolvedBin).toBe("node");
+      expect(zcode.protocol).toBe("app-server");
+      // app-server IS implemented (T5/T6) — must not be flagged unsupported
+      // (unlike the acp/pi-rpc family).
+      expect(zcode.unsupported).toBeUndefined();
+    });
+
+    it("detectAgents() returns available=false when no install is found (no throw)", () => {
+      stubPlatform("darwin");
+      existsSyncMock.mockReturnValue(false);
+
+      const agents = detectAgents();
+      const zcode = findAgent(agents, "zcode");
+
+      expect(zcode.available).toBe(false);
+      expect(zcode.path).toBeUndefined();
+      expect(zcode.resolvedBin).toBeUndefined();
+      expect(zcode.protocol).toBe("app-server");
+      expect(zcode.unsupported).toBeUndefined();
+    });
+
+    it("fallbackModels start with DEFAULT_MODEL and append the saved provider's models", () => {
+      // ZCode must be available for the saved provider's models to be read
+      // (the config read is gated on availability). Stub the install.
+      vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
+      stubPlatform("linux");
+      existsSyncMock.mockImplementation((p) => p === "/opt/zcode/zcode.cjs");
+      // Saved provider config present: models are surfaced in the picker.
+      readZcodeConfigMock.mockReturnValue({
+        provider: "builtin:zai",
+        model: "glm-5-plus",
+        models: ["glm-5-plus", "glm-5-air", "glm-5-flash"],
+      });
+
+      const agents = detectAgents();
+      const zcode = findAgent(agents, "zcode");
+
+      expect(zcode.models).toEqual([
+        DEFAULT_MODEL,
+        { id: "glm-5-plus", label: "glm-5-plus" },
+        { id: "glm-5-air", label: "glm-5-air" },
+        { id: "glm-5-flash", label: "glm-5-flash" },
+      ]);
+    });
+
+    it("fallbackModels fall back to [DEFAULT_MODEL] when no saved provider", () => {
+      // Available install but no ~/.zcode/v2 store — DEFAULT_MODEL (let the
+      // CLI pick) is the only entry.
+      vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
+      stubPlatform("linux");
+      existsSyncMock.mockImplementation((p) => p === "/opt/zcode/zcode.cjs");
+      readZcodeConfigMock.mockReturnValue(null);
+
+      const agents = detectAgents();
+      const zcode = findAgent(agents, "zcode");
+
+      expect(zcode.models).toEqual([DEFAULT_MODEL]);
     });
   });
 });

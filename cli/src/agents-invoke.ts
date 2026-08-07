@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { resolveOnPath, AGENTS, type AgentDef, type AgentProtocol } from "./agents-detect.js";
+import { resolveOnPath, resolveZcodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef, type AgentProtocol } from "./agents-detect.js";
 import { readZcodeConfig } from "@html-anything/zcode-protocol/zcode-config";
 import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
 import { startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
@@ -662,9 +662,14 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
   }
 
   // binArgs carries the leading argv a node-script CLI needs (e.g.
-  // ["<resolvedCjs>", "app-server"]). The prompt is NOT piped to stdin — it
-  // travels inside the JSON-RPC session/send request.
-  const argv = [...(def.binArgs ?? [])];
+  // [ZCODE_CJS_SENTINEL, "app-server"]). The prompt is NOT piped to stdin — it
+  // travels inside the JSON-RPC session/send request. The sentinel on the
+  // AgentDef is filled here from resolveZcodeBin() so the spawn runs
+  // `node <real-cjs-path> app-server` (T7 — makes ZCode invocable end to end
+  // through the T5 invoke branch).
+  const argv = (def.binArgs ?? []).map((arg) =>
+    arg === ZCODE_CJS_SENTINEL ? (resolveZcodeBin() ?? arg) : arg,
+  );
 
   // Lifted above the ReadableStream so `cancel` (a sibling callback) can tear
   // the turn + child down without waiting on `start`.

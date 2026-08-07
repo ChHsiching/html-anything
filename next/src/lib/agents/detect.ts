@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join, posix, win32 } from "node:path";
+import { readZcodeConfig } from "@html-anything/zcode-protocol/zcode-config";
 
 /**
  * Per-agent invocation protocol. Determines what `invokeAgent` does with the
@@ -27,6 +28,15 @@ export type ModelOption = { id: string; label: string };
 
 /** Synthetic "let the CLI pick" entry — agent runs without `--model`. */
 export const DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (CLI config)" };
+
+/**
+ * Sentinel placed in ZCode's `AgentDef.binArgs` where the resolved path to
+ * the `zcode.cjs` bundle belongs. Filled at detect time (availability) and
+ * invoke time (the actual spawn) by {@link resolveZcodeBin}. Exported so the
+ * invoke layer substitutes the same token, not a brittle string literal copy
+ * (a typo there would silently spawn the literal). See ADR-0002 decision 3.
+ */
+export const ZCODE_CJS_SENTINEL = "<resolved-zcode-cjs>";
 
 export type AgentDef = {
   id: string;
@@ -330,6 +340,25 @@ export const AGENTS: AgentDef[] = [
       { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
     ],
   },
+  // ZCode (Z.AI) — first app-server protocol agent. Unlike the agents above,
+  // its CLI is a node bundle (zcode.cjs) spawned as `node <cjs> app-server`,
+  // so bin: "node" and binArgs carries the node-script leading argv. The
+  // `<resolved-zcode-cjs>` sentinel is filled by resolveZcodeBin() at detect
+  // time (availability) and invoke time (the actual spawn). fallbackModels
+  // here is the static floor; detectAgents() merges the saved provider's GLM
+  // models on top (see readZcodeConfig). protocol "app-server" IS implemented
+  // (T6), so this entry is never marked unsupported — distinct from the
+  // acp/pi-rpc detection-only family above. See ADR-0002 decision 2.
+  {
+    id: "zcode",
+    label: "ZCode",
+    bin: "node",
+    envOverride: "ZCODE_BIN",
+    vendor: "Z.AI",
+    protocol: "app-server",
+    binArgs: [ZCODE_CJS_SENTINEL, "app-server"],
+    fallbackModels: [DEFAULT_MODEL],
+  },
 ];
 
 function userToolchainDirs(): string[] {
@@ -526,9 +555,24 @@ export type DetectedAgent = {
   unsupported?: boolean;
 };
 
+/**
+ * Build the model picker list for ZCode: the saved provider's GLM models (from
+ * `~/.zcode/v2/model-providers.json` via the T1 config reader) appended after
+ * `DEFAULT_MODEL`, so the user can switch variants. Only called when the
+ * install is available, so we don't touch the config file for an agent that
+ * can't run anyway. Other agents use their static `fallbackModels` verbatim.
+ */
+function zcodeModels(): ModelOption[] {
+  const config = readZcodeConfig();
+  const extra = config?.models ?? [];
+  return [DEFAULT_MODEL, ...extra.map((m) => ({ id: m, label: m }))];
+}
+
 export function detectAgents(): DetectedAgent[] {
   return AGENTS.map((a): DetectedAgent => {
     const protocol = a.protocol ?? "stdin";
+    // "app-server" (ZCode) is implemented in T6 — NOT unsupported, unlike
+    // the acp/pi-rpc family which is detection-only.
     const unsupported = protocol === "acp" || protocol === "pi-rpc";
     const base = {
       id: a.id,
@@ -538,6 +582,28 @@ export function detectAgents(): DetectedAgent[] {
       models: a.fallbackModels,
       unsupported: unsupported || undefined,
     };
+
+    // ZCode's CLI is a .cjs bundle, not a standalone exec on PATH — its
+    // availability is driven by resolveZcodeBin() (which already honours
+    // ZCODE_BIN, PATH, and platform defaults). The generic PATH branch below
+    // would wrongly report `node` (bin) as the install, so ZCode gets its own
+    // detection: available iff the .cjs resolves. resolvedBin is the node bin
+    // the spawn path will use (node <cjs> app-server). The saved provider's
+    // models are read only when available.
+    if (protocol === "app-server") {
+      const cjs = resolveZcodeBin();
+      if (cjs) {
+        return {
+          ...base,
+          models: zcodeModels(),
+          available: true,
+          path: cjs,
+          resolvedBin: a.bin,
+        };
+      }
+      return { ...base, available: false };
+    }
+
     const override = a.envOverride ? process.env[a.envOverride] : undefined;
     if (override && existsSync(override)) {
       return { ...base, available: true, path: override, resolvedBin: a.bin };

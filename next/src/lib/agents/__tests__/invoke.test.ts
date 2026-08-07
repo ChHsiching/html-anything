@@ -35,7 +35,6 @@ vi.mock("@html-anything/zcode-protocol/zcode-config", () => ({
 }));
 
 import { invokeAgent, type InvokeEvent } from "../invoke";
-import { AGENTS } from "../detect";
 
 function makeFakeChild() {
   const stdout = new PassThrough();
@@ -133,26 +132,18 @@ const USE_SHELL = process.platform === "win32";
 const BIN_OVERRIDE = "/bin/sh";
 
 describe("invokeAgent — app-server protocol branch (ZCode)", () => {
-  const ZCODE_DEF = {
-    id: "zcode",
-    label: "ZCode",
-    bin: "node",
-    vendor: "Z.AI",
-    protocol: "app-server" as const,
-    binArgs: ["/resolved/zcode.cjs", "app-server"],
-    fallbackModels: [{ id: "default", label: "Default" }],
-  };
-
-  let pushed: unknown | null = null;
   beforeEach(() => {
-    // ZCode isn't registered until T7; push a temporary AgentDef so the
-    // app-server branch is reachable. Removed in afterEach.
-    pushed = ZCODE_DEF;
-    (AGENTS as unknown[]).push(ZCODE_DEF);
+    // Make resolveZcodeBin() return the test .cjs path so the binArgs
+    // sentinel resolves to it (T7 invoke-time substitution). ZCode is now
+    // registered in AGENTS (T7); no temporary def push is needed.
+    vi.stubEnv("ZCODE_BIN", "/resolved/zcode.cjs");
     // The app-server bin is an absolute path ("/resolved/node"); let the
-    // mocked existsSync accept it so resolveBinForAgent succeeds.
+    // mocked existsSync accept it so resolveBinForAgent succeeds. Also
+    // accept the ZCODE_BIN path so resolveZcodeBin's first probe hits.
     existsSyncDelegate.mockImplementation((p: string) =>
-      p === "/resolved/node" || p === "/bin/sh",
+      p === "/resolved/node" ||
+      p === "/resolved/zcode.cjs" ||
+      p === "/bin/sh",
     );
     mockSpawn.mockReset();
     (
@@ -166,11 +157,7 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     });
   });
   afterEach(() => {
-    if (pushed) {
-      const idx = (AGENTS as unknown[]).lastIndexOf(pushed);
-      if (idx >= 0) (AGENTS as unknown[]).splice(idx, 1);
-    }
-    pushed = null;
+    vi.unstubAllEnvs();
     existsSyncDelegate.mockImplementation((p: string) => p === "/bin/sh");
   });
 
