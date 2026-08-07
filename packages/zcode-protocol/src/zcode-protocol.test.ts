@@ -71,9 +71,11 @@ describe("createZcodeProtocolClient — request/response", () => {
     const client = createZcodeProtocolClient(child);
 
     const pending = client.request({ id: "r1", method: "workspace/ping", params: {} });
-    // No response yet; the frame must already be on the wire.
+    // No response yet; the frame must already be on the wire. The real
+    // app-server rejects a `jsonrpc` envelope, so outbound frames are bare
+    // `{ id, method, params }`.
     const outbound = outboundFrames(child);
-    expect(outbound).toEqual([{ jsonrpc: "2.0", id: "r1", method: "workspace/ping", params: {} }]);
+    expect(outbound).toEqual([{ id: "r1", method: "workspace/ping", params: {} }]);
 
     child.stdout.emit("data", Buffer.from(`${JSON.stringify({ id: "r1", result: { ok: true } })}\n`));
     await expect(pending).resolves.toEqual({ id: "r1", result: { ok: true } });
@@ -178,14 +180,14 @@ describe("createZcodeProtocolClient — onNotification", () => {
 });
 
 describe("createZcodeProtocolClient — respond", () => {
-  it("writes a `{ jsonrpc, id, result }` frame to child.stdin", () => {
+  it("writes a bare `{ id, result }` frame (no jsonrpc envelope) to child.stdin", () => {
     const child = makeChild();
     const client = createZcodeProtocolClient(child);
 
     client.respond("srv-1", { headersApplied: true });
 
     expect(outboundFrames(child)).toEqual([
-      { jsonrpc: "2.0", id: "srv-1", result: { headersApplied: true } },
+      { id: "srv-1", result: { headersApplied: true } },
     ]);
   });
 });

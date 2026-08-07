@@ -19,13 +19,24 @@ describe("parseZcodeConfig", () => {
         name: "Z.AI",
         apiKey: "52d6b0ae.oLRk06",
         models: ["glm-5.1", "glm-5-turbo", "glm-4.7"],
+        endpoints: { anthropic: "https://api.z.ai/api/anthropic", openai: "https://api.z.ai/api/coding/paas/v4", gemini: "" },
       },
     ];
 
+    // Vendor gateway (not api.anthropic.com / api.openai.com) → openai-compatible
+    // carrying the vendor's openai-style endpoint as baseURL. The literal
+    // anthropic/openai kinds would dial the official hosts and reject the key.
     expect(parseZcodeConfig(data)).toEqual({
       provider: "builtin:zai",
       model: "glm-5.1",
       models: ["glm-5.1", "glm-5-turbo", "glm-4.7"],
+      providerRecord: {
+        providerId: "builtin:zai",
+        kind: "openai-compatible",
+        baseURL: "https://api.z.ai/api/coding/paas/v4",
+        apiKey: { source: "inline", value: "52d6b0ae.oLRk06" },
+        models: [{ modelId: "glm-5.1" }, { modelId: "glm-5-turbo" }, { modelId: "glm-4.7" }],
+      },
     });
   });
 
@@ -38,7 +49,41 @@ describe("parseZcodeConfig", () => {
       provider: "a",
       model: "m1",
       models: ["m1"],
+      providerRecord: {
+        providerId: "a",
+        // No endpoints -> openai-compatible, no baseURL.
+        kind: "openai-compatible",
+        apiKey: { source: "inline", value: "key-a" },
+        models: [{ modelId: "m1" }],
+      },
     });
+  });
+
+  it("uses kind 'anthropic' when the endpoint is the official api.anthropic.com", () => {
+    const data = [
+      { id: "ant", name: "Anthropic", apiKey: "k", models: ["m1"], endpoints: { anthropic: "https://api.anthropic.com" } },
+    ];
+    const cfg = parseZcodeConfig(data);
+    expect(cfg?.providerRecord.kind).toBe("anthropic");
+    expect(cfg?.providerRecord.baseURL).toBeUndefined();
+  });
+
+  it("uses kind 'openai' when the endpoint is the official api.openai.com", () => {
+    const data = [
+      { id: "oai", name: "OpenAI", apiKey: "k", models: ["m1"], endpoints: { openai: "https://api.openai.com/v1" } },
+    ];
+    const cfg = parseZcodeConfig(data);
+    expect(cfg?.providerRecord.kind).toBe("openai");
+    expect(cfg?.providerRecord.baseURL).toBeUndefined();
+  });
+
+  it("falls back to openai-compatible + anthropic baseURL when only the anthropic endpoint is set", () => {
+    const data = [
+      { id: "v", name: "Vendor", apiKey: "k", models: ["m1"], endpoints: { anthropic: "https://vendor/api", openai: "" } },
+    ];
+    const cfg = parseZcodeConfig(data);
+    expect(cfg?.providerRecord.kind).toBe("openai-compatible");
+    expect(cfg?.providerRecord.baseURL).toBe("https://vendor/api");
   });
 
   it("returns null when no provider has a non-empty apiKey", () => {
@@ -76,6 +121,12 @@ describe("parseZcodeConfig", () => {
       provider: "ok",
       model: "m1",
       models: ["m1"],
+      providerRecord: {
+        providerId: "ok",
+        kind: "openai-compatible",
+        apiKey: { source: "inline", value: "k" },
+        models: [{ modelId: "m1" }],
+      },
     });
   });
 });
@@ -107,6 +158,12 @@ describe("readZcodeConfig", () => {
       provider: "p",
       model: "m1",
       models: ["m1", "m2"],
+      providerRecord: {
+        providerId: "p",
+        kind: "openai-compatible",
+        apiKey: { source: "inline", value: "k" },
+        models: [{ modelId: "m1" }, { modelId: "m2" }],
+      },
     });
   });
 

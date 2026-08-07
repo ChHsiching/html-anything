@@ -18,6 +18,43 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isRecord } from "./internal.js";
+
+/**
+ * The API-key credential object the app-server's `workspace/upsertModelProvider`
+ * expects on the `provider.apiKey` field. The real server rejects a bare string
+ * here — it is a discriminated union on `source`, and the `source: "inline"`
+ * branch is the one that accepts the key as a string `value` (the `source:
+ * "env"` branch wants an env-var *name*, which we cannot populate). We always
+ * send `{ source: "inline", value }`.
+ */
+export interface ZcodeApiKey {
+  source: "inline";
+  value: string;
+}
+
+/**
+ * The full provider object the app-server's `workspace/upsertModelProvider`
+ * requires. Mapped from the saved GUI entry — the server validates this with a
+ * Zod schema and rejects a bare provider-id string with
+ * "expected object, received string".
+ */
+export interface ZcodeProviderRecord {
+  /** Provider id, e.g. `builtin:zai` (the GUI entry's `id`). */
+  providerId: string;
+  /** Wire format: `anthropic` | `openai` | `openai-compatible`. */
+  kind: "anthropic" | "openai" | "openai-compatible";
+  apiKey: ZcodeApiKey;
+  /** Models as `{ modelId }` records — the server rejects bare strings. */
+  models: { modelId: string }[];
+  /**
+   * Base URL the `openai-compatible` kind routes model requests to. Required
+   * when `kind === "openai-compatible"` (the server rejects the provider with
+   * "missing baseURL" otherwise). Omitted for the literal `anthropic`/`openai`
+   * kinds, which hard-code `api.anthropic.com` / `api.openai.com`.
+   */
+  baseURL?: string;
+}
 
 /** The canonical provider selection the adapter hands to the protocol layer. */
 export interface ZcodeConfig {
@@ -32,6 +69,12 @@ export interface ZcodeConfig {
   model: string;
   /** The provider's full model list, for the picker / `fallbackModels`. */
   models: string[];
+  /**
+   * The full provider record handed to `workspace/upsertModelProvider`. The
+   * app-server requires an object here (provider id + wire kind + inline
+   * api-key + model records), not a bare provider-id string.
+   */
+  providerRecord: ZcodeProviderRecord;
 }
 
 /** Shape of a single entry in `model-providers.json` (fields we read). */
@@ -40,6 +83,7 @@ interface RawProvider {
   name?: unknown;
   apiKey?: unknown;
   models?: unknown;
+  endpoints?: unknown;
 }
 
 /**
@@ -69,6 +113,48 @@ export function parseZcodeConfig(data: unknown): ZcodeConfig | null {
   return null;
 }
 
+/**
+ * Pick the wire `kind` + baseURL for `workspace/upsertModelProvider`.
+ *
+ * The app-server's three kinds route model requests differently:
+ *   - `anthropic`         → hard-codes `api.anthropic.com`
+ *   - `openai`            → hard-codes `api.openai.com`
+ *   - `openai-compatible` → uses the provider's `baseURL` (REQUIRED)
+ *
+ * The official kinds ignore the provider's saved endpoint URL. So a non-first-
+ * party provider whose `endpoints.anthropic`/`endpoints.openai` points at a
+ * vendor gateway (e.g. Z.AI's `api.z.ai/api/anthropic`) MUST use
+ * `openai-compatible` with that gateway as `baseURL`, otherwise the server
+ * dials the literal official host and the vendor key is rejected as invalid.
+ *
+ * Rule: only pick `anthropic`/`openai` when the saved endpoint actually IS the
+ * official host; otherwise fall through to `openai-compatible` carrying the
+ * vendor's openai-style endpoint as `baseURL`.
+ */
+function resolveProviderKind(
+  raw: RawProvider,
+): { kind: "anthropic" | "openai" | "openai-compatible"; baseURL?: string } {
+  const endpoints = isRecord(raw.endpoints) ? raw.endpoints : null;
+  const anthropicUrl =
+    typeof endpoints?.anthropic === "string" ? endpoints.anthropic : "";
+  const openaiUrl =
+    typeof endpoints?.openai === "string" ? endpoints.openai : "";
+
+  // Official-host short-circuits (the literal kinds route there anyway).
+  if (/^https?:\/\/api\.anthropic\.com/i.test(anthropicUrl)) {
+    return { kind: "anthropic" };
+  }
+  if (/^https?:\/\/api\.openai\.com/i.test(openaiUrl)) {
+    return { kind: "openai" };
+  }
+
+  // Anything else (vendor gateways, self-hosted) needs openai-compatible with
+  // a baseURL. Prefer the openai-style endpoint (matches the OpenAI-shaped
+  // request the server builds); fall back to the anthropic-style URL.
+  const baseURL = openaiUrl || anthropicUrl;
+  return { kind: "openai-compatible", ...(baseURL ? { baseURL } : {}) };
+}
+
 /** Validate one raw provider entry; return null if it is unusable. */
 function parseProvider(entry: unknown): ZcodeConfig | null {
   if (entry === null || typeof entry !== "object") return null;
@@ -87,7 +173,20 @@ function parseProvider(entry: unknown): ZcodeConfig | null {
   );
   if (modelList.length === 0) return null;
 
-  return { provider: id, model: modelList[0]!, models: modelList };
+  const firstModel = modelList[0]!;
+  const { kind, baseURL } = resolveProviderKind(raw);
+  return {
+    provider: id,
+    model: firstModel,
+    models: modelList,
+    providerRecord: {
+      providerId: id,
+      kind,
+      apiKey: { source: "inline", value: apiKey },
+      models: modelList.map((modelId) => ({ modelId })),
+      ...(baseURL ? { baseURL } : {}),
+    },
+  };
 }
 
 /**

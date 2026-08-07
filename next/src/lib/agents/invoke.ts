@@ -36,6 +36,18 @@ type BinResolution =
  * deserves to see the typo / wrong path instead of mysteriously running a
  * different binary.
  */
+/**
+ * Quote a single argv element for cmd.exe when `spawn(..., { shell: true })` is
+ * used on Windows. cmd.exe splits the argv array on whitespace, so an element
+ * containing a space — notably ZCode's resolved `C:\Program
+ * Files\ZCode\resources\glm\zcode.cjs` — must be double-quoted. Already-quoted
+ * elements are left alone; empty elements become `""`.
+ */
+function quoteWindowsArg(arg: string): string {
+  if (arg.length > 0 && arg.startsWith('"') && arg.endsWith('"')) return arg;
+  return `"${arg}"`;
+}
+
 function resolveBinForAgent(
   def: (typeof AGENTS)[number],
   binOverride: string | undefined,
@@ -181,15 +193,21 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         // EINVAL / "spawn 无效的参数". macOS/Linux use direct exec.
         // Safety: prompt content is delivered via stdin or `--message
         // <text>` (argv-message), not interpolated into a shell command,
-        // so this does not introduce a shell-injection vector.
+        // so this does not introduce a shell-injection vector. Each argv
+        // element is quoted too, so paths with spaces (e.g. ZCode's
+        // `C:\Program Files\ZCode\...\zcode.cjs`) survive the shell round-trip.
         const useShell = process.platform === "win32";
-        child = spawn(useShell ? `"${bin}"` : bin!, fullArgv, {
-          cwd: opts.cwd ?? process.cwd(),
-          env,
-          stdio: ["pipe", "pipe", "pipe"],
-          shell: useShell,
-          windowsVerbatimArguments: false,
-        });
+        child = spawn(
+          useShell ? `"${bin}"` : bin!,
+          useShell ? fullArgv.map(quoteWindowsArg) : fullArgv,
+          {
+            cwd: opts.cwd ?? process.cwd(),
+            env,
+            stdio: ["pipe", "pipe", "pipe"],
+            shell: useShell,
+            windowsVerbatimArguments: false,
+          },
+        );
       } catch (err) {
         safeEnqueue({
           type: "error",
@@ -420,15 +438,21 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       try {
         // Same Windows `.cmd`/`.bat` shim handling as the argv branch: quote
         // the bin and run through a shell on win32 so `node` resolves a
-        // `.cmd` wrapper when one exists.
+        // `.cmd` wrapper when one exists. argv elements are quoted too, so
+        // the resolved `zcode.cjs` path (`C:\Program Files\ZCode\...`) is not
+        // split on its space by cmd.exe.
         const useShell = process.platform === "win32";
-        child = spawn(useShell ? `"${bin}"` : bin, argv, {
-          cwd: opts.cwd ?? process.cwd(),
-          env: envFor(opts.agent),
-          stdio: ["pipe", "pipe", "pipe"],
-          shell: useShell,
-          windowsVerbatimArguments: false,
-        });
+        child = spawn(
+          useShell ? `"${bin}"` : bin,
+          useShell ? argv.map(quoteWindowsArg) : argv,
+          {
+            cwd: opts.cwd ?? process.cwd(),
+            env: envFor(opts.agent),
+            stdio: ["pipe", "pipe", "pipe"],
+            shell: useShell,
+            windowsVerbatimArguments: false,
+          },
+        );
       } catch (err) {
         safeEnqueue({
           type: "error",

@@ -6,11 +6,16 @@
  * "ZCode app-server protocol"):
  *
  *   1. `workspace/upsertModelProvider` — register the saved API-key provider
- *      ({@link ZcodeConfig.provider}) on the workspace.
- *   2. `workspace/setDefaultModel` — make the provider's model
- *      ({@link ZcodeConfig.model}) the active one for the workspace.
+ *      on the workspace. The app-server validates `provider` as an object
+ *      (`{ providerId, kind, apiKey, models }`), so we send the full
+ *      {@link ZcodeConfig.providerRecord}, not the bare id.
+ *   2. `workspace/setDefaultModel` — make the provider's model the active one
+ *      for the workspace. `model` is validated as `{ modelId, providerId }`.
  *   3. `session/create` (or `session/resume` when `resumeSessionId` is given)
- *      — open the session; the response carries the `sessionId`.
+ *      — open the session; the response carries the `sessionId`. The server
+ *      issues a `session/requestRuntimePreferences` server→client request
+ *      mid-create and blocks the create response on its reply; we answer it
+ *      with `{ nativeSearchEnhancementsEnabled: false }`.
  *   4. `session/setMode` — only when a non-empty `mode` is supplied.
  *   5. `session/subscribe` — register this client for the session's event
  *      stream (delivery kind selects how events arrive).
@@ -18,11 +23,12 @@
  *      asynchronously as notifications.
  *
  * While the turn runs, this driver subscribes to the client's notification
- * channel: it auto-answers `interaction/requestProviderRuntimeHeaders`
- * (server→client request) with `{ headersApplied: true }`, and forwards every
- * frame to the stream handler, which maps deltas/status into `onEvent`. The
- * returned `unsubscribe` detaches that notification listener so a caller can
- * stop receiving events (e.g. on abort) without disposing the client.
+ * channel: it auto-answers the two server→client handshake requests
+ * (`interaction/requestProviderRuntimeHeaders` and
+ * `session/requestRuntimePreferences`), and forwards every frame to the stream
+ * handler, which maps deltas/status into `onEvent`. The returned `unsubscribe`
+ * detaches that notification listener so a caller can stop receiving events
+ * (e.g. on abort) without disposing the client.
  */
 
 import path from "node:path";
@@ -169,13 +175,25 @@ export async function startZcodeProtocolTurn({
 }: StartZcodeProtocolTurnOptions): Promise<StartedZcodeProtocolTurn> {
   const stream = createZcodeStreamHandler(onEvent);
   const unsubscribe = client.onNotification((frame) => {
-    // Auto-answer the provider-runtime-headers handshake so model output can
-    // start. Failure is encoded inside `result`, not a JSON-RPC error.
+    // Auto-answer the two server→client handshake requests the app-server
+    // issues during a turn, so model output can actually start:
+    //   - interaction/requestProviderRuntimeHeaders — provider auth headers
+    //     for the upcoming model request. Failure is encoded inside `result`,
+    //     not a JSON-RPC error, so we reply `{ headersApplied: true }`.
+    //   - session/requestRuntimePreferences — fires inside `session/create`;
+    //     the server blocks the create response on this reply and validates
+    //     the result with a Zod schema (`nativeSearchEnhancementsEnabled` is a
+    //     required boolean). Replying `{}` is rejected with code -32603.
     if (
       frame.method === "interaction/requestProviderRuntimeHeaders" &&
       typeof frame.id === "string"
     ) {
       client.respond(frame.id, { headersApplied: true });
+    } else if (
+      frame.method === "session/requestRuntimePreferences" &&
+      typeof frame.id === "string"
+    ) {
+      client.respond(frame.id, { nativeSearchEnhancementsEnabled: false });
     }
     stream.handleFrame(frame);
   });
@@ -192,13 +210,20 @@ export async function startZcodeProtocolTurn({
 
   try {
     const workspace = workspaceFor(cwd, workspaceKey);
+    // The app-server validates `provider` and `model` as objects, not bare
+    // id strings (ZodError "expected object, received string"). `provider`
+    // is the full record from the saved config; `model` is the default
+    // model pinned to its provider.
     await request("workspace/upsertModelProvider", {
       workspace,
-      provider: providerSelection.provider,
+      provider: providerSelection.providerRecord,
     });
     await request("workspace/setDefaultModel", {
       workspace,
-      model: providerSelection.model,
+      model: {
+        modelId: providerSelection.model,
+        providerId: providerSelection.provider,
+      },
     });
 
     const trimmedResumeSessionId = resumeSessionId?.trim() || null;

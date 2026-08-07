@@ -38,6 +38,13 @@ const PROVIDER: ZcodeConfig = {
   provider: "builtin:zai",
   model: "glm-5.1",
   models: ["glm-5.1"],
+  providerRecord: {
+    providerId: "builtin:zai",
+    kind: "openai-compatible",
+    baseURL: "https://api.z.ai/api/coding/paas/v4",
+    apiKey: { source: "inline", value: "test-key" },
+    models: [{ modelId: "glm-5.1" }],
+  },
 };
 
 describe("startZcodeProtocolTurn — end-to-end over a real protocol client", () => {
@@ -154,12 +161,66 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
     );
 
     // The turn driver's listener must have caused the client to write a real
-    // respond() frame back to stdin with { headersApplied: true }.
+    // respond() frame back to stdin with { headersApplied: true }. No
+    // jsonrpc envelope — the real app-server rejects it.
     const respondFrame = inboundServerFrames.find((f) => f.id === "srv-hdrs" && f.result);
     expect(respondFrame).toEqual({
-      jsonrpc: "2.0",
       id: "srv-hdrs",
       result: { headersApplied: true },
+    });
+
+    turn.unsubscribe();
+    client.dispose();
+  });
+
+  it("auto-responds to session/requestRuntimePreferences with nativeSearchEnhancementsEnabled", async () => {
+    const child = makeChild();
+    const client = createZcodeProtocolClient(child);
+
+    const responses: Record<string, Record<string, unknown>> = {
+      "workspace/upsertModelProvider": { ok: true },
+      "workspace/setDefaultModel": { ok: true },
+      "session/create": { session: { sessionId: "e2e-3" } },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    };
+    const inboundServerFrames: Record<string, unknown>[] = [];
+    child.stdin.on("data", (data: Buffer) => {
+      for (const line of data.toString("utf8").split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const frame = JSON.parse(trimmed) as { id: string; method?: string };
+        inboundServerFrames.push(frame);
+        if (typeof frame.method === "string" && responses[frame.method]) {
+          child.stdout.write(
+            `${JSON.stringify({ id: frame.id, result: responses[frame.method] })}\n`,
+          );
+        }
+      }
+    });
+
+    const turn = await startZcodeProtocolTurn({
+      client,
+      cwd: "/proj/gamma",
+      prompt: "p",
+      providerSelection: PROVIDER,
+      onEvent: () => {},
+    });
+
+    child.stdout.write(
+      `${JSON.stringify({
+        id: "srv-prefs",
+        method: "session/requestRuntimePreferences",
+        params: { sessionId: "e2e-3", scope: "runtime-materialization" },
+      })}\n`,
+    );
+
+    // The server validates the result with a Zod schema requiring
+    // nativeSearchEnhancementsEnabled (boolean); replying {} is rejected.
+    const respondFrame = inboundServerFrames.find((f) => f.id === "srv-prefs" && f.result);
+    expect(respondFrame).toEqual({
+      id: "srv-prefs",
+      result: { nativeSearchEnhancementsEnabled: false },
     });
 
     turn.unsubscribe();

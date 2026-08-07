@@ -10,7 +10,11 @@
  *
  * Wire format: one JSON object per line on both stdin (requests we send) and
  * stdout (responses, async notifications, and server→client requests we
- * receive). Frames carry `jsonrpc: "2.0"` per the spec.
+ * receive). NOTE: the real `zcode app-server` uses a JSON-RPC-shaped line
+ * protocol but **rejects the `jsonrpc: "2.0"` envelope** — frames are bare
+ * `{id, method, params}` / `{id, result}` / `{id, error}`. Adding the
+ * `jsonrpc` field makes the server return `{"error":{"code":-32600,...}}`
+ * ("Unrecognized key: jsonrpc"), so every outbound frame omits it.
  *
  * Three frame kinds flow back from the server:
  *   - a **response** to one of our requests — matched by string `id`, routed
@@ -268,7 +272,7 @@ export function createZcodeProtocolClient(child: ChildProcess): ZcodeProtocolCli
         pending.set(request.id, { resolve, reject, timer, cleanup });
 
         try {
-          stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...request })}\n`);
+          stdin.write(`${JSON.stringify(request)}\n`);
         } catch (error) {
           clearTimeout(timer);
           cleanup();
@@ -289,7 +293,7 @@ export function createZcodeProtocolClient(child: ChildProcess): ZcodeProtocolCli
       if (disposed) {
         throw new Error("zcode protocol client already disposed");
       }
-      writeFrame({ jsonrpc: "2.0", id, result });
+      writeFrame({ id, result });
     },
 
     dispose(): void {

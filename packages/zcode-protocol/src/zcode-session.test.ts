@@ -63,6 +63,13 @@ const PROVIDER: ZcodeConfig = {
   provider: "builtin:zai",
   model: "glm-5.1",
   models: ["glm-5.1"],
+  providerRecord: {
+    providerId: "builtin:zai",
+    kind: "openai-compatible",
+    baseURL: "https://api.z.ai/api/coding/paas/v4",
+    apiKey: { source: "inline", value: "test-key" },
+    models: [{ modelId: "glm-5.1" }],
+  },
 };
 
 describe("startZcodeProtocolTurn — method sequence", () => {
@@ -128,7 +135,7 @@ describe("startZcodeProtocolTurn — method sequence", () => {
     const upsert = client.requests[0]!;
     expect(upsert.params).toEqual({
       workspace: { workspacePath: "/proj/foo", workspaceKey: "od-foo" },
-      provider: "builtin:zai",
+      provider: PROVIDER.providerRecord,
     });
   });
 
@@ -153,7 +160,7 @@ describe("startZcodeProtocolTurn — method sequence", () => {
 
     expect(client.requests[1]!.params).toEqual({
       workspace: { workspacePath: "/proj/foo", workspaceKey: "od-foo" },
-      model: "glm-5.1",
+      model: { modelId: "glm-5.1", providerId: "builtin:zai" },
     });
   });
 
