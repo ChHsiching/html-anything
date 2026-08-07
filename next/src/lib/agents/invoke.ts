@@ -1,7 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolveOnPath, resolveOpenclawAgentId, AGENTS } from "./detect";
-import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError } from "./argv";
+import { resolveOnPath, resolveOpenclawAgentId, AGENTS, type AgentDef } from "./detect";
+import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError, rescueHtmlFromToolUse } from "./argv";
+import { readZcodeConfig } from "@html-anything/zcode-protocol/zcode-config";
+import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
+import { startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
 
 export type InvokeOpts = {
   agent: string;
@@ -96,6 +99,15 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   }
   const bin: string = resolved.bin;
 
+  // app-server protocol agents (ZCode) take a different path: a single
+  // JSON-RPC turn over stdio driven by the shared zcode-protocol layer, not
+  // the line-parsed stdout loop below. Mirror cli's T5 — see ADR-0002
+  // decision 2 for why ZCode's wire format is not the ACP JSON-RPC the
+  // hermes/kimi family speaks.
+  if (def.protocol === "app-server") {
+    return invokeAppServerAgent({ def, bin, opts });
+  }
+
   // For openclaw we need an async detection step (resolveOpenclawAgentId)
   // before buildArgv. Do all of the argv assembly inside the stream's async
   // start so we can `await` and surface failures as `error` events.
@@ -157,6 +169,11 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       // an explicit `--message <text>` flag.
       if (promptViaMessageFlag) argv = [...argv, "--message", opts.prompt];
 
+      // node-script CLIs (ZCode's zcode.cjs) run as `node <cjs> app-server`;
+      // binArgs carries the leading argv the bin needs. Absent for every
+      // existing adapter, so their spawn is unchanged. See ADR-0002 decision 3.
+      const fullArgv = def.binArgs?.length ? [...def.binArgs, ...argv] : argv;
+
       try {
         // On Windows, `spawn` cannot launch a `.cmd` / `.bat` shim (which is
         // what npm installs for most CLI agents) without going through the
@@ -166,7 +183,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         // <text>` (argv-message), not interpolated into a shell command,
         // so this does not introduce a shell-injection vector.
         const useShell = process.platform === "win32";
-        child = spawn(useShell ? `"${bin}"` : bin!, argv, {
+        child = spawn(useShell ? `"${bin}"` : bin!, fullArgv, {
           cwd: opts.cwd ?? process.cwd(),
           env,
           stdio: ["pipe", "pipe", "pipe"],
@@ -185,7 +202,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       safeEnqueue({
         type: "start",
         bin: bin!,
-        argv,
+        argv: fullArgv,
         promptBytes: Buffer.byteLength(opts.prompt, "utf8"),
       });
 
@@ -315,6 +332,239 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       opts.signal?.addEventListener("abort", onAbort, { once: true });
     },
     cancel() {},
+  });
+}
+
+// ─── app-server protocol branch (ZCode) ───────────────────────────────
+//
+// Drives a single JSON-RPC turn over a spawned `zcode app-server` child and
+// bridges the protocol layer's events into the shared `InvokeEvent` stream.
+// Distinct from the "acp" path: ZCode's app-server wire format
+// (workspace/* + session/*) is not the ACP JSON-RPC the hermes/kimi family
+// speaks — do not assume a shared parser (ADR-0002 decision 2).
+//
+// The protocol client wraps the child but never kills it; owning the process
+// lifecycle (spawn + kill) is this layer's job (ADR-0001 "Protocol client vs
+// child process").
+
+type AppServerInvokeArgs = {
+  def: AgentDef;
+  bin: string;
+  opts: InvokeOpts;
+};
+
+function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): ReadableStream<InvokeEvent> {
+  // The saved API-key provider selection from ~/.zcode/v2/. Without it we can't
+  // configure the workspace, so there's no point spawning the server.
+  const providerSelection = readZcodeConfig();
+  if (!providerSelection) {
+    return errorStream(
+      `${def.label}: no saved model provider found in ~/.zcode/v2/model-providers.json. ` +
+        `Open the ZCode GUI, sign in to a provider, and retry.`,
+    );
+  }
+
+  // binArgs carries the leading argv a node-script CLI needs (e.g.
+  // ["<resolvedCjs>", "app-server"]). The prompt is NOT piped to stdin — it
+  // travels inside the JSON-RPC session/send request.
+  const argv = [...(def.binArgs ?? [])];
+
+  // Lifted above the ReadableStream so `cancel` (a sibling callback) can tear
+  // the turn + child down without waiting on `start`.
+  let child: ChildProcessWithoutNullStreams | null = null;
+  let turnUnsubscribe: (() => void) | null = null;
+  let client: ReturnType<typeof createZcodeProtocolClient> | null = null;
+
+  return new ReadableStream<InvokeEvent>({
+    async start(controller) {
+      let closed = false;
+
+      const safeEnqueue = (ev: InvokeEvent) => {
+        if (closed) return;
+        try {
+          controller.enqueue(ev);
+        } catch {
+          closed = true;
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {}
+      };
+      const killChild = () => {
+        try {
+          child?.kill("SIGTERM");
+        } catch {}
+      };
+      const teardown = () => {
+        try {
+          turnUnsubscribe?.();
+        } catch {}
+        turnUnsubscribe = null;
+        try {
+          client?.dispose();
+        } catch {}
+        client = null;
+        killChild();
+        safeClose();
+      };
+
+      try {
+        // Same Windows `.cmd`/`.bat` shim handling as the argv branch: quote
+        // the bin and run through a shell on win32 so `node` resolves a
+        // `.cmd` wrapper when one exists.
+        const useShell = process.platform === "win32";
+        child = spawn(useShell ? `"${bin}"` : bin, argv, {
+          cwd: opts.cwd ?? process.cwd(),
+          env: envFor(opts.agent),
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: useShell,
+          windowsVerbatimArguments: false,
+        });
+      } catch (err) {
+        safeEnqueue({
+          type: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+        safeClose();
+        return;
+      }
+
+      safeEnqueue({
+        type: "start",
+        bin,
+        argv,
+        promptBytes: Buffer.byteLength(opts.prompt, "utf8"),
+      });
+
+      client = createZcodeProtocolClient(child);
+
+      // Bridge the protocol stream's mapped events into InvokeEvent. Each kind
+      // the consumer cares about becomes one of the shared event types; turn
+      // end (status:completed) signals {type:"done"}; an `error` event or the
+      // turn driver rejecting signals {type:"error"}.
+      let turnEnded = false;
+      const finish = (code: number | null) => {
+        if (turnEnded) return;
+        turnEnded = true;
+        safeEnqueue({ type: "done", code });
+        teardown();
+      };
+
+      const onEvent = (event: Record<string, unknown>) => {
+        if (closed || turnEnded) return;
+        const type = typeof event.type === "string" ? event.type : "";
+        if (type === "text_delta") {
+          const delta = typeof event.delta === "string" ? event.delta : "";
+          if (delta) safeEnqueue({ type: "delta", text: delta });
+          return;
+        }
+        if (type === "tool_use") {
+          // A file-write tool call may carry the generated HTML; reuse the
+          // same rescue logic the other adapters apply to Claude-style
+          // tool_use blocks.
+          const name = typeof event.name === "string" ? event.name : "";
+          const input = (event.input ?? null) as unknown;
+          const html = rescueHtmlFromToolUse([{ type: "tool_use", name, input }]);
+          if (html) safeEnqueue({ type: "html", text: html });
+          return;
+        }
+        if (type === "usage") {
+          // final-result: turn end. `usage` (and optional `durationMs`) arrive
+          // here as the cumulative end-of-turn summary.
+          safeEnqueue({ type: "meta", key: "usage", value: event.usage ?? null });
+          if (event.durationMs != null) {
+            safeEnqueue({ type: "meta", key: "duration_ms", value: event.durationMs });
+          }
+          finish(0);
+          return;
+        }
+        if (type === "status") {
+          const label = typeof event.label === "string" ? event.label : "";
+          if (label === "completed") {
+            finish(0);
+          } else if (label === "failed") {
+            safeEnqueue({
+              type: "error",
+              message: "zcode turn failed (status: failed)",
+            });
+            finish(1);
+          }
+          return;
+        }
+        if (type === "error") {
+          const message =
+            typeof event.message === "string" && event.message.length > 0
+              ? event.message
+              : "zcode turn failed";
+          safeEnqueue({ type: "error", message });
+          finish(1);
+          return;
+        }
+        // thinking_*, conversation_title, tool_result, etc. are not part of the
+        // InvokeEvent surface today; intentionally dropped.
+      };
+
+      // The child dying before the turn resolves is an error (the protocol
+      // client already rejects the pending request, but this surfaces a clean
+      // InvokeEvent and runs teardown).
+      child.on("close", (code) => {
+        if (!turnEnded) {
+          safeEnqueue({
+            type: "error",
+            message: `zcode app-server exited before turn completed (code ${code}).`,
+          });
+        }
+        finish(code);
+      });
+      child.on("error", (err) => {
+        safeEnqueue({ type: "error", message: err.message });
+        finish(1);
+      });
+
+      try {
+        const turn = await startZcodeProtocolTurn({
+          client,
+          cwd: opts.cwd ?? process.cwd(),
+          prompt: opts.prompt,
+          providerSelection,
+          onEvent,
+          signal: opts.signal,
+        });
+        turnUnsubscribe = turn.unsubscribe;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        safeEnqueue({ type: "error", message });
+        finish(1);
+      }
+
+      const onAbort = () => {
+        if (!turnEnded) {
+          safeEnqueue({ type: "error", message: "aborted" });
+        }
+        finish(null);
+      };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+    },
+    cancel() {
+      // Stream consumer cancelled: detach the turn listener, dispose the
+      // client, and kill the child. We do NOT enqueue here — the
+      // ReadableStream guarantees no further enqueue after cancel.
+      try {
+        turnUnsubscribe?.();
+      } catch {}
+      turnUnsubscribe = null;
+      try {
+        client?.dispose();
+      } catch {}
+      client = null;
+      try {
+        child?.kill("SIGTERM");
+      } catch {}
+    },
   });
 }
 

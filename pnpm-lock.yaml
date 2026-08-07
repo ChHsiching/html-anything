@@ -51,6 +51,9 @@ importers:
 
   next:
     dependencies:
+      '@html-anything/zcode-protocol':
+        specifier: workspace:*
+        version: link:../packages/zcode-protocol
       clsx:
         specifier: ^2.1.1
         version: 2.1.1

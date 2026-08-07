@@ -201,8 +201,12 @@ export function parseLine(agent: string, line: string): AgentParse[] {
  * Rescue the HTML from the tool_use input so the preview still gets the real
  * content. Returns an empty string if no Write/create_file tool_use was found
  * or its input has no usable content field.
+ *
+ * Exported because the app-server protocol branch (ZCode) reuses the same
+ * rescue logic for ZCode's `write` tool calls — see invoke.ts. Keeping one
+ * canonical implementation avoids the two copies drifting.
  */
-function rescueHtmlFromToolUse(
+export function rescueHtmlFromToolUse(
   content: Array<{ type?: string; name?: string; input?: unknown }> | undefined,
 ): string {
   if (!Array.isArray(content)) return "";
