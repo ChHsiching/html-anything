@@ -6,19 +6,25 @@ import { createZcodeProtocolClient } from "./zcode-protocol.js";
 import { startZcodeProtocolTurn } from "./zcode-session.js";
 
 /**
- * End-to-end integration seam (issue #5, criterion 5): drive
- * `startZcodeProtocolTurn` through a REAL `createZcodeProtocolClient` whose
- * child is a `PassThrough`-backed fake. Unlike the per-module unit tests
- * (which mock the client or feed frames directly), this one proves the
- * modules compose over real JSON-RPC framing: every request the turn driver
- * issues is an actual newline-delimited JSON object on child.stdin, and every
- * forged response + notification we emit on child.stdout is parsed by the real
- * client and routed back.
+ * Module-composition seam: drive `startZcodeProtocolTurn` through a REAL
+ * `createZcodeProtocolClient` whose child is a `PassThrough`-backed fake.
  *
- * ADR-0004 / #13: the app-server child self-authenticates from the user's
- * logged-in state, so the turn is create → (setMode) → subscribe → send. No
- * provider/key relay occurs — this integration seam pins that the real wire
- * frames contain no workspace/upsertModelProvider or workspace/setDefaultModel.
+ * This is NOT a real-server integration test (the real one lives in
+ * `zcode-real-server.integration.test.ts`, gated on the ZCode binary existing).
+ * It proves the three modules compose over real JSON-RPC framing: every request
+ * the turn driver issues is an actual newline-delimited JSON object on
+ * child.stdin, and every forged response + notification we emit on child.stdout
+ * is parsed by the real client and routed back. The frames scripted here are
+ * pinned against the real server's Zod schemas (live-confirmed by #14 probes),
+ * not invented shapes — so this seam catches drift between the client framing
+ * and the turn driver's expected wire format.
+ *
+ * #14 (live-corrected): the app-server child self-authenticates the LOGIN but a
+ * fresh `session/create` needs the workspace model configured first (the
+ * caller's once-per-boot relay — see ensureWorkspaceModel, tested separately).
+ * This composition seam exercises the turn driver in isolation, so no relay
+ * runs here; the scripted create response stands in for a pre-configured
+ * workspace.
  *
  * To make this deterministic without racing the async sequence, we tap
  * child.stdin: each time the client writes a request frame, a scripted responder
@@ -38,8 +44,8 @@ function makeChild(): FakeChild {
   return emitter as unknown as FakeChild;
 }
 
-describe("startZcodeProtocolTurn — end-to-end over a real protocol client", () => {
-  it("drives the turn (no provider relay) and delivers a text_delta to onEvent", async () => {
+describe("startZcodeProtocolTurn — module composition over a real protocol client", () => {
+  it("drives the turn and delivers a text_delta to onEvent", async () => {
     const child = makeChild();
     const client = createZcodeProtocolClient(child);
 
@@ -78,20 +84,13 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
       onEvent: (e) => events.push(e),
     });
 
-    // The post-#13 sequence was sent, in order, as real JSON-RPC frames —
-    // with the provider relay structurally absent.
+    // The turn sequence was sent, in order, as real JSON-RPC frames.
     expect(outbound.map((f) => f.method)).toEqual([
       "session/create",
       "session/setMode",
       "session/subscribe",
       "session/send",
     ]);
-    expect(outbound.map((f) => f.method)).not.toContain(
-      "workspace/upsertModelProvider",
-    );
-    expect(outbound.map((f) => f.method)).not.toContain(
-      "workspace/setDefaultModel",
-    );
     expect(turn.sessionId).toBe("e2e-1");
 
     // Now inject an asynchronous content notification on the real stdout path.
@@ -110,60 +109,7 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
     client.dispose();
   });
 
-  it("auto-responds to requestProviderRuntimeHeaders over the real wire", async () => {
-    const child = makeChild();
-    const client = createZcodeProtocolClient(child);
-
-    const responses: Record<string, Record<string, unknown>> = {
-      "session/create": { session: { sessionId: "e2e-2" } },
-      "session/subscribe": { ok: true },
-      "session/send": { ok: true },
-    };
-    const inboundServerFrames: Record<string, unknown>[] = [];
-    child.stdin.on("data", (data: Buffer) => {
-      for (const line of data.toString("utf8").split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const frame = JSON.parse(trimmed) as { id: string; method?: string };
-        inboundServerFrames.push(frame);
-        if (typeof frame.method === "string" && responses[frame.method]) {
-          child.stdout.write(
-            `${JSON.stringify({ id: frame.id, result: responses[frame.method] })}\n`,
-          );
-        }
-      }
-    });
-
-    const turn = await startZcodeProtocolTurn({
-      client,
-      cwd: "/proj/beta",
-      prompt: "p",
-      onEvent: () => {},
-    });
-
-    // Server initiates the headers handshake on stdout (real wire path).
-    child.stdout.write(
-      `${JSON.stringify({
-        id: "srv-hdrs",
-        method: "interaction/requestProviderRuntimeHeaders",
-        params: {},
-      })}\n`,
-    );
-
-    // The turn driver's listener must have caused the client to write a real
-    // respond() frame back to stdin with { headersApplied: true }. No
-    // jsonrpc envelope — the real app-server rejects it.
-    const respondFrame = inboundServerFrames.find((f) => f.id === "srv-hdrs" && f.result);
-    expect(respondFrame).toEqual({
-      id: "srv-hdrs",
-      result: { headersApplied: true },
-    });
-
-    turn.unsubscribe();
-    client.dispose();
-  });
-
-  it("auto-responds to session/requestRuntimePreferences with nativeSearchEnhancementsEnabled", async () => {
+  it("auto-responds to session/requestRuntimePreferences over the real wire (proven issued)", async () => {
     const child = makeChild();
     const client = createZcodeProtocolClient(child);
 
@@ -203,12 +149,62 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
     );
 
     // The server validates the result with a Zod schema requiring
-    // nativeSearchEnhancementsEnabled (boolean); replying {} is rejected.
+    // nativeSearchEnhancementsEnabled (boolean) — #14 probe-13 confirmed the
+    // exact spelling. Replying {} is rejected with code -32603.
     const respondFrame = inboundServerFrames.find((f) => f.id === "srv-prefs" && f.result);
     expect(respondFrame).toEqual({
       id: "srv-prefs",
       result: { nativeSearchEnhancementsEnabled: false },
     });
+
+    turn.unsubscribe();
+    client.dispose();
+  });
+
+  it("does NOT write a respond frame for interaction/requestProviderRuntimeHeaders (vestigial, removed)", async () => {
+    const child = makeChild();
+    const client = createZcodeProtocolClient(child);
+
+    const responses: Record<string, Record<string, unknown>> = {
+      "session/create": { session: { sessionId: "e2e-4" } },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    };
+    const inboundServerFrames: Record<string, unknown>[] = [];
+    child.stdin.on("data", (data: Buffer) => {
+      for (const line of data.toString("utf8").split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const frame = JSON.parse(trimmed) as { id: string; method?: string };
+        inboundServerFrames.push(frame);
+        if (typeof frame.method === "string" && responses[frame.method]) {
+          child.stdout.write(
+            `${JSON.stringify({ id: frame.id, result: responses[frame.method] })}\n`,
+          );
+        }
+      }
+    });
+
+    const turn = await startZcodeProtocolTurn({
+      client,
+      cwd: "/proj/delta",
+      prompt: "p",
+      onEvent: () => {},
+    });
+
+    // #14 probes 3 + 12: the server NEVER issued this across two full turns.
+    // The auto-reply handler is removed; even if a stray frame arrives, no
+    // respond frame is written back to stdin.
+    child.stdout.write(
+      `${JSON.stringify({
+        id: "srv-hdrs",
+        method: "interaction/requestProviderRuntimeHeaders",
+        params: {},
+      })}\n`,
+    );
+
+    const respondFrame = inboundServerFrames.find((f) => f.id === "srv-hdrs" && f.result);
+    expect(respondFrame).toBeUndefined();
 
     turn.unsubscribe();
     client.dispose();

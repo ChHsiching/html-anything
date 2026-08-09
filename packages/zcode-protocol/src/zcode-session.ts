@@ -1,41 +1,49 @@
 /**
  * Drives one full `app-server` turn over the JSON-RPC client: open (or resume)
- * a session, subscribe, and send the prompt.
+ * a session, subscribe, and send the prompt. Also exposes
+ * {@link ensureWorkspaceModel} — the once-per-boot model relay.
  *
- * ADR-0004 / #13: the app-server child **self-authenticates** from the user's
- * logged-in state — it resolves the BigModel Coding Plan entitlement on its
- * own at boot, with no client-side provider/key relay. A live probe
- * (2026-08-10) confirmed a bare `session/list` returns the logged-in user's
- * real sessions with zero credential handling. The previous
- * `workspace/upsertModelProvider` + `workspace/setDefaultModel` relay is
- * deleted: it was dead weight (the child was always authed) and worse, it was
- * the root of the "Coding Plan can't be served" failure (the old
- * `parseProvider` rejected `apiKey:""` entries, which is exactly what Coding
- * Plan entries legitimately have, so it picked the wrong provider entirely).
+ * ADR-0004 + #14 (live-probe-corrected): the app-server child
+ * **self-authenticates the LOGIN** — a bare `session/list` returns the
+ * logged-in user's real sessions with zero credential handling (proven by 12
+ * live probes). BUT a fresh `session/create` needs the workspace model
+ * configured first, or it fails with `ModelProtocolError: Model config is
+ * missing`. The model SELECTION must be provisioned; the login does not have
+ * to be. The relay that #13 deleted (on the unverified assumption the child
+ * self-resolves the model too) is therefore restored here as
+ * {@link ensureWorkspaceModel} — a **once-per-boot** step the caller runs
+ * before the first create. It reads ZCode's own `~/.zcode/v2/config.json`
+ * (the GUI's resolved config) and feeds the selection back to the zcode child
+ * (left-pocket → right-pocket — model selection, not credential grafting).
  *
- * The post-#13 sequence is:
+ * #13's "child self-resolves its model" was an unverified extrapolation:
+ * ADR-0004's own open-follow-up flagged the create→send loop was never
+ * closed. The #14 live probes closed that loop and proved the relay is
+ * required for fresh create. `session/resume` of an existing session needs no
+ * relay (the session carries its model).
+ *
+ * The turn sequence is:
  *   1. `session/create` (or `session/resume` when `resumeSessionId` is given)
- *      — open the session against the child's already-resolved auth; the
- *      response carries the `sessionId`. The server may issue a
- *      `session/requestRuntimePreferences` server→client request mid-create
- *      and block the create response on its reply; we answer it with
- *      `{ nativeSearchEnhancementsEnabled: false }`.
+ *      — open the session; the response carries the `sessionId`. During
+ *      create AND send the server issues a `session/requestRuntimePreferences`
+ *      server→client request and blocks on its reply; we answer it with
+ *      `{ nativeSearchEnhancementsEnabled: false }` (live-confirmed by #14 probes
+ *      3, 8, 12 — this is NOT vestigial).
  *   2. `session/setMode` — only when a non-empty `mode` is supplied.
- *   3. `session/subscribe` — register this client for the session's event
- *      stream (delivery kind selects how events arrive).
- *   4. `session/send` — deliver the prompt. After this, model output arrives
- *      asynchronously as notifications.
+ *   3. `session/subscribe` — register for the session's event stream
+ *      (`deliveryKind` is the server-validated enum
+ *      `"desktop-continuous" | "web-remote-replayable"`).
+ *   4. `session/send` — deliver the prompt as `{ sessionId, content }`.
  *
  * While the turn runs, this driver subscribes to the client's notification
- * channel: it auto-answers the two server→client handshake requests
- * (`interaction/requestProviderRuntimeHeaders` and
- * `session/requestRuntimePreferences`), and forwards every frame to the stream
- * handler, which maps deltas/status into `onEvent`. The returned `unsubscribe`
- * detaches that notification listener so a caller can stop receiving events
- * (e.g. on abort) without disposing the client.
+ * channel: it auto-answers `session/requestRuntimePreferences` (proven
+ * issued), forwards every frame to the stream handler, which maps
+ * deltas/status into `onEvent`. NOTE: the previous
+ * `interaction/requestProviderRuntimeHeaders` auto-reply is REMOVED — #14
+ * probes 3 + 12 never observed the server issue it across two full turns; it
+ * was vestigial. The returned `unsubscribe` detaches that listener so a caller
+ * can stop receiving events (e.g. on abort) without disposing the client.
  */
-
-import path from "node:path";
 
 import { isRecord, type JsonRecord } from "./internal.js";
 import type {
@@ -43,6 +51,7 @@ import type {
   ZcodeProtocolRequest,
   ZcodeProtocolResponse,
 } from "./zcode-protocol.js";
+import { readZcodeConfig } from "./zcode-config.js";
 import { createZcodeStreamHandler } from "./zcode-stream.js";
 
 /** A mapped stream event, opaque to this layer. */
@@ -86,9 +95,10 @@ export interface StartZcodeProtocolTurnOptions {
   /** Optional AbortSignal forwarded to each `client.request`. */
   signal?: AbortSignal;
   /**
-   * Stable workspace key. Defaults to `od-<basename(cwd)>` (derived, so two
-   * dirs with the same basename collide — callers that need isolation pass an
-   * explicit key).
+   * Stable workspace key. Defaults to the full `cwd` (live-confirmed: the real
+   * GUI/server use the full path as `workspaceKey`, not a derived
+   * `od-<basename>` token). Pass an explicit key only if you need to
+   * decouple it from the working directory.
    */
   workspaceKey?: string;
 }
@@ -101,6 +111,86 @@ export interface StartedZcodeProtocolTurn {
 }
 
 const DEFAULT_DELIVERY_KIND = "desktop-continuous";
+
+/** Options for {@link ensureWorkspaceModel}. */
+export interface EnsureWorkspaceModelOptions {
+  client: ZcodeProtocolClientLike;
+  /** Working directory the session runs in; seeds `workspace.workspacePath`. */
+  cwd: string;
+  /** Per-request timeout forwarded to the client. */
+  requestTimeoutMs?: number;
+  /** Optional AbortSignal forwarded to each `client.request`. */
+  signal?: AbortSignal;
+  /**
+   * Stable workspace key. Defaults to the full `cwd` (live-confirmed: the GUI
+   * uses the full path as the workspace key).
+   */
+  workspaceKey?: string;
+}
+
+/** The model the workspace was configured with, from {@link ensureWorkspaceModel}. */
+export interface EnsuredWorkspaceModel {
+  providerId: string;
+  modelId: string;
+}
+
+/**
+ * Configure the workspace's default model on a freshly booted app-server child.
+ *
+ * #14 (live-probe-corrected): a fresh `session/create` fails with
+ * `ModelProtocolError: Model config is missing` unless the workspace has a
+ * configured default model. This reads ZCode's own resolved config
+ * (`~/.zcode/v2/config.json`, the file the GUI writes — NOT the template
+ * `model-providers.json` whose coding-plan entries have `apiKey: ""`), picks
+ * the first enabled provider with a non-empty API key, and runs
+ * `workspace/upsertModelProvider` then `workspace/setDefaultModel` — exactly
+ * once per booted child. After this, any number of `session/create` calls in
+ * the same child lifetime succeed without re-relaying (probe-10 confirmed a
+ * second create needs no relay).
+ *
+ * The relay is model SELECTION, not credential grafting: it reads ZCode's own
+ * file and feeds the selection back to ZCode's own child. The login still
+ * self-authenticates (`session/list` works with no relay).
+ *
+ * @throws {Error} when no usable provider is configured, with an actionable
+ *   message pointing at the config file and the GUI — a fresh create would
+ *   fail opaquely otherwise, so failing fast with the fix is preferable.
+ */
+export async function ensureWorkspaceModel({
+  client,
+  cwd,
+  requestTimeoutMs,
+  signal,
+  workspaceKey,
+}: EnsureWorkspaceModelOptions): Promise<EnsuredWorkspaceModel> {
+  const config = readZcodeConfig();
+  if (!config) {
+    throw new Error(
+      "No usable ZCode provider found in ~/.zcode/v2/config.json " +
+        "(no enabled provider with a non-empty API key). Configure a model " +
+        "provider in the ZCode GUI (it writes the resolved selection to that " +
+        "file), then retry.",
+    );
+  }
+
+  const workspace = workspaceFor(cwd, workspaceKey);
+  const request = makeRequester(client, {
+    idPrefix: "zcode-ensure",
+    requestTimeoutMs,
+    signal,
+  });
+
+  await request("workspace/upsertModelProvider", {
+    workspace,
+    provider: config.providerRecord,
+  });
+  await request("workspace/setDefaultModel", {
+    workspace,
+    model: { providerId: config.provider, modelId: config.model },
+  });
+
+  return { providerId: config.provider, modelId: config.model };
+}
 
 /**
  * Thrown when a `session/resume` target can no longer be found (expired /
@@ -148,11 +238,38 @@ function isZcodeResumeMissingError(error: unknown): boolean {
   );
 }
 
-/** Build the workspace record shared by every workspace/* + session/* call. */
+/**
+ * Build the workspace record shared by every workspace/* + session/* call.
+ * `workspaceKey` defaults to the full `cwd` — live-confirmed (#14 probe-1: real
+ * sessions carry `workspaceKey === workspacePath === the full cwd`, not a
+ * derived `od-<basename>` token).
+ */
 function workspaceFor(cwd: string, workspaceKey?: string): JsonRecord {
+  const key = workspaceKey?.trim();
   return {
     workspacePath: cwd,
-    workspaceKey: workspaceKey?.trim() || `od-${path.basename(cwd) || "workspace"}`,
+    workspaceKey: key && key.length > 0 ? key : cwd,
+  };
+}
+
+/**
+ * Build a per-turn/per-step `request(method, params)` helper that mints
+ * sequential ids prefixed with `idPrefix`. Shared by {@link ensureWorkspaceModel}
+ * (once-per-boot relay) and {@link startZcodeProtocolTurn} (the turn driver) so
+ * the two don't drift on id shape.
+ */
+function makeRequester(
+  client: ZcodeProtocolClientLike,
+  opts: { idPrefix: string; requestTimeoutMs?: number; signal?: AbortSignal },
+) {
+  let seq = 0;
+  return (method: string, params: JsonRecord) => {
+    seq += 1;
+    return client.request(
+      { id: `${opts.idPrefix}-${seq}`, method, params },
+      opts.requestTimeoutMs,
+      opts.signal,
+    );
   };
 }
 
@@ -175,21 +292,18 @@ export async function startZcodeProtocolTurn({
 }: StartZcodeProtocolTurnOptions): Promise<StartedZcodeProtocolTurn> {
   const stream = createZcodeStreamHandler(onEvent);
   const unsubscribe = client.onNotification((frame) => {
-    // Auto-answer the two server→client handshake requests the app-server
-    // issues during a turn, so model output can actually start:
-    //   - interaction/requestProviderRuntimeHeaders — provider auth headers
-    //     for the upcoming model request. Failure is encoded inside `result`,
-    //     not a JSON-RPC error, so we reply `{ headersApplied: true }`.
-    //   - session/requestRuntimePreferences — fires inside `session/create`;
-    //     the server blocks the create response on this reply and validates
-    //     the result with a Zod schema (`nativeSearchEnhancementsEnabled` is a
-    //     required boolean). Replying `{}` is rejected with code -32603.
+    // Auto-answer the one server→client handshake request the app-server
+    // issues during a turn (live-confirmed #14 probes 3, 8, 12):
+    //   - session/requestRuntimePreferences — fires inside `session/create`
+    //     AND `session/send`; the server blocks the response on this reply and
+    //     validates the result with a Zod schema
+    //     (`nativeSearchEnhancementsEnabled` is a required boolean — #14 probe-13
+    //     is rejected with code -32603, so we send the boolean.
+    //
+    // NOTE: `interaction/requestProviderRuntimeHeaders` was previously
+    // auto-answered here too, but #14 probes 3 + 12 never observed the server
+    // issue it across two full turns — it was vestigial and is removed.
     if (
-      frame.method === "interaction/requestProviderRuntimeHeaders" &&
-      typeof frame.id === "string"
-    ) {
-      client.respond(frame.id, { headersApplied: true });
-    } else if (
       frame.method === "session/requestRuntimePreferences" &&
       typeof frame.id === "string"
     ) {
@@ -198,15 +312,11 @@ export async function startZcodeProtocolTurn({
     stream.handleFrame(frame);
   });
 
-  let requestSeq = 0;
-  const request = (method: string, params: JsonRecord) => {
-    requestSeq += 1;
-    return client.request(
-      { id: `zcode-${requestSeq}`, method, params },
-      requestTimeoutMs,
-      signal,
-    );
-  };
+  const request = makeRequester(client, {
+    idPrefix: "zcode",
+    requestTimeoutMs,
+    signal,
+  });
 
   try {
     const workspace = workspaceFor(cwd, workspaceKey);
@@ -214,11 +324,13 @@ export async function startZcodeProtocolTurn({
     const trimmedResumeSessionId = resumeSessionId?.trim() || null;
     let sessionId: string;
     if (trimmedResumeSessionId) {
+      // #14: resume schema is { sessionId } only — the server ignores any
+      // workspace field (live-confirmed probe-6). An existing session already
+      // carries its model, so this path needs NO ensureWorkspaceModel relay.
       try {
         sessionId = sessionIdFromCreateResponse(
           await request("session/resume", {
             sessionId: trimmedResumeSessionId,
-            workspace,
           }),
         );
       } catch (error) {
@@ -232,6 +344,9 @@ export async function startZcodeProtocolTurn({
     }
 
     if (mode?.trim()) {
+      // The server validates mode against the enum
+      // "plan" | "build" | "edit" | "yolo" | "auto" (live-confirmed #14
+      // probe-5). An unrecognized mode is rejected with -32602.
       await request("session/setMode", { sessionId, mode: mode.trim() });
     }
     await request("session/subscribe", { sessionId, deliveryKind });

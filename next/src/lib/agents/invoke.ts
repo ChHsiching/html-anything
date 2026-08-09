@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { resolveOnPath, resolveOpenclawAgentId, resolveZcodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef } from "./detect";
 import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError, rescueHtmlFromToolUse } from "./argv";
 import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
-import { startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
+import { ensureWorkspaceModel, startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
 
 export type InvokeOpts = {
   agent: string;
@@ -371,12 +371,17 @@ type AppServerInvokeArgs = {
 };
 
 function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): ReadableStream<InvokeEvent> {
-  // ADR-0004 / #13: the app-server child self-authenticates from the user's
-  // logged-in state — it resolves the Coding Plan entitlement on its own. The
-  // adapter spawns, drives, and parses; it provisions NO provider/key. The
-  // previous readZcodeConfig() → "no saved provider" short-circuit is deleted:
-  // there is no credential to gate on. The only precondition is the install
-  // existing (checked above in invokeAgent before this branch).
+  // ADR-0004 + #14 (live-probe-corrected): the app-server child self-authentic
+  // ates the LOGIN from the user's logged-in state (a bare session/list returns
+  // the real sessions with no credential handling). BUT a fresh session/create
+  // needs the workspace model configured first, or it fails with
+  // "Model config is missing". The adapter therefore runs the once-per-boot
+  // model relay (ensureWorkspaceModel — upsert+setDefault, reading ZCode's own
+  // ~/.zcode/v2/config.json) before the turn. This is model SELECTION relay
+  // (left-pocket → right-pocket), not credential grafting: the key never
+  // leaves ZCode's ecosystem. #13 deleted this relay on the unverified
+  // assumption the child self-resolves the model too; #14 live probes
+  // disproved that and restored it.
 
   // binArgs carries the leading argv a node-script CLI needs (e.g.
   // [ZCODE_CJS_SENTINEL, "app-server"]). The prompt is NOT piped to stdin — it
@@ -561,6 +566,15 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       });
 
       try {
+        // #14: once-per-boot model relay. Required for a fresh session/create
+        // (the child self-auths the login but not the model selection). Runs
+        // exactly once per spawned child; the turn driver then creates the
+        // session against the now-configured workspace.
+        await ensureWorkspaceModel({
+          client,
+          cwd: opts.cwd ?? process.cwd(),
+          signal: opts.signal,
+        });
         const turn = await startZcodeProtocolTurn({
           client,
           cwd: opts.cwd ?? process.cwd(),

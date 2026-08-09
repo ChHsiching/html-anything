@@ -7,8 +7,9 @@
   "exports": {
     ".": "./dist/zcode-protocol.js",
     "./zcode-protocol": "./dist/zcode-protocol.js",
-    "./zcode-stream": "./dist/zcode-stream.js",
-    "./zcode-session": "./dist/zcode-session.js"
+    "./zcode-config": "./dist/zcode-config.js",
+    "./zcode-session": "./dist/zcode-session.js",
+    "./zcode-stream": "./dist/zcode-stream.js"
   },
   "main": "./dist/zcode-protocol.js",
   "types": "./dist/zcode-protocol.d.ts",

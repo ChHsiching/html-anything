@@ -2,9 +2,21 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 
-const { mockSpawn, existsSyncDelegate } = vi.hoisted(() => ({
+const { mockSpawn, existsSyncDelegate, mockReadZcodeConfig } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   existsSyncDelegate: vi.fn((p: string) => p === "/bin/sh"),
+  mockReadZcodeConfig: vi.fn((): unknown => ({
+    provider: "builtin:bigmodel-coding-plan",
+    model: "GLM-5.2",
+    models: ["GLM-5.2"],
+    providerRecord: {
+      providerId: "builtin:bigmodel-coding-plan",
+      kind: "anthropic",
+      apiKey: { source: "inline", value: "test-key" },
+      models: [{ modelId: "GLM-5.2" }],
+      baseURL: "https://open.bigmodel.cn/api/anthropic",
+    },
+  })),
 }));
 
 vi.mock("node:child_process", () => ({
@@ -15,6 +27,13 @@ vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return { ...actual, existsSync: existsSyncDelegate };
 });
+
+// #14: ensureWorkspaceModel reads the saved provider config. Mock it so the
+// invoke-layer tests don't touch disk; the config reader itself is tested in
+// the protocol package.
+vi.mock("@html-anything/zcode-protocol/zcode-config", () => ({
+  readZcodeConfig: mockReadZcodeConfig,
+}));
 
 import { invokeAgent, type InvokeEvent } from "../agents-invoke.js";
 
@@ -581,6 +600,8 @@ describe("invokeAgent", () => {
       });
 
       const responses: Record<string, Record<string, unknown>> = {
+        "workspace/upsertModelProvider": { ok: true },
+        "workspace/setDefaultModel": { ok: true },
         "session/create": { session: { sessionId: "sess-1" } },
         "session/setMode": { ok: true },
         "session/subscribe": { ok: true },
@@ -862,14 +883,14 @@ describe("invokeAgent", () => {
       expect((errors[0] as { message: string }).message).toContain("no session");
     });
 
-    // ADR-0004 / #13: the app-server child self-authenticates from the user's
-    // logged-in state, so the adapter must NOT relay any provider/key. This
-    // pins the structural absence: the wire sequence contains no
-    // workspace/upsertModelProvider, no workspace/setDefaultModel, and no
-    // provider object on any frame — the turn is create→subscribe→send only.
-    // If anyone reintroduces a readZcodeConfig() → upsertModelProvider relay
-    // to the app-server branch, this test fails on the captured stdin wire.
-    it("does not relay any provider/key to the app-server child (self-authenticates)", async () => {
+    // ADR-0004 + #14 (live-probe-corrected): the app-server child self-auths
+    // the LOGIN, but a fresh session/create needs the workspace model
+    // configured first (#13 wrongly deleted this relay on the unverified
+    // assumption the child self-resolves the model; #14 live probes disproved
+    // that). So the adapter runs the once-per-boot model relay
+    // (upsertModelProvider → setDefaultModel) BEFORE the turn. This pins the
+    // full wire sequence including the relay, and the provider object shape.
+    it("relays the once-per-boot model config (upsert→setDefault) before the turn", async () => {
       const { child, stdout, sentMethods } = makeAppServerChild();
       mockSpawn.mockReturnValue(child);
 
@@ -895,17 +916,34 @@ describe("invokeAgent", () => {
 
       await eventsPromise;
 
-      // The deleted relay methods must NEVER appear on the wire.
-      expect(sentMethods).not.toContain("workspace/upsertModelProvider");
-      expect(sentMethods).not.toContain("workspace/setDefaultModel");
-      // The turn is: session/create → session/setMode (no mode here, so absent)
-      // → session/subscribe → session/send. Assert the exact shape so a
-      // reintroduced provider step shifts the sequence and fails here.
+      // The relay runs first, then the turn. Assert the exact full sequence.
       expect(sentMethods).toEqual([
+        "workspace/upsertModelProvider",
+        "workspace/setDefaultModel",
         "session/create",
         "session/subscribe",
         "session/send",
       ]);
+    });
+
+    it("emits {type:'error'} and does not create when no usable provider is configured", async () => {
+      mockReadZcodeConfig.mockReturnValueOnce(null);
+      const { child } = makeAppServerChild();
+      mockSpawn.mockReturnValue(child);
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "p",
+        binOverride: "/resolved/node",
+      });
+
+      await new Promise((r) => setTimeout(r, 0));
+      const events = await collectStream(stream);
+
+      const error = events.find((e) => e.type === "error");
+      expect(error).toBeDefined();
+      expect((error as { message?: string }).message).toMatch(/no usable ZCode provider/i);
+      // No session frames sent — the relay failed fast before the turn.
     });
   });
 });

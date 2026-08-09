@@ -1,6 +1,23 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ZcodeProtocolClientLike } from "./zcode-session.js";
-import { startZcodeProtocolTurn } from "./zcode-session.js";
+import { startZcodeProtocolTurn, ensureWorkspaceModel } from "./zcode-session.js";
+
+// Mock the config reader so tests don't touch disk. The relay's job is to
+// send the right frames; the config reader is tested separately.
+vi.mock("./zcode-config.js", () => ({
+  readZcodeConfig: () => ({
+    provider: "builtin:bigmodel-coding-plan",
+    model: "GLM-5.2",
+    models: ["GLM-5.2", "GLM-5-Turbo"],
+    providerRecord: {
+      providerId: "builtin:bigmodel-coding-plan",
+      kind: "anthropic",
+      apiKey: { source: "inline", value: "test-key" },
+      models: [{ modelId: "GLM-5.2" }, { modelId: "GLM-5-Turbo" }],
+      baseURL: "https://open.bigmodel.cn/api/anthropic",
+    },
+  }),
+}));
 
 /**
  * A fake protocol client. It records every `request`/`respond` call in order
@@ -23,8 +40,6 @@ function makeFakeClient(
 ): FakeClient {
   const requests: FakeClient["requests"] = [];
   const responds: FakeClient["responds"] = [];
-  // Held in a mutable box so the `notificationListener` getter (below) stays
-  // live even after the turn driver's unsubscribe nulls it.
   const box = { listener: null as FakeClient["notificationListener"] };
 
   const base = {
@@ -48,8 +63,6 @@ function makeFakeClient(
       responds.push({ id, result: structuredClone(result) });
     },
   };
-  // `notificationListener` is read live so a test can invoke the currently
-  // registered listener (and observe when unsubscribe clears it).
   return Object.defineProperties(base, {
     notificationListener: {
       get: () => box.listener,
@@ -58,12 +71,104 @@ function makeFakeClient(
   }) as FakeClient;
 }
 
+// ---------------------------------------------------------------------------
+// ensureWorkspaceModel — the once-per-boot model relay (#14, restored).
+// ---------------------------------------------------------------------------
+
+describe("ensureWorkspaceModel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("sends upsert → setDefault with the live-confirmed workspace + provider + model shapes", async () => {
+    const client = makeFakeClient({
+      "workspace/upsertModelProvider": { ok: true },
+      "workspace/setDefaultModel": { ok: true },
+    });
+
+    const result = await ensureWorkspaceModel({
+      client,
+      cwd: "C:\\proj\\alpha",
+    });
+
+    expect(result).toEqual({
+      providerId: "builtin:bigmodel-coding-plan",
+      modelId: "GLM-5.2",
+    });
+    expect(client.requests.map((r) => r.method)).toEqual([
+      "workspace/upsertModelProvider",
+      "workspace/setDefaultModel",
+    ]);
+
+    // upsert: { workspace: {workspaceKey, workspacePath}, provider: {...live shape} }
+    const upsert = client.requests[0]!;
+    expect(upsert.params).toEqual({
+      workspace: {
+        // workspaceKey is the FULL cwd (the GUI/server use the full path,
+        // not od-<basename>) — live-confirmed by #14 probe-1 (real sessions
+        // carry workspaceKey === the full path).
+        workspaceKey: "C:\\proj\\alpha",
+        workspacePath: "C:\\proj\\alpha",
+      },
+      provider: {
+        providerId: "builtin:bigmodel-coding-plan",
+        kind: "anthropic",
+        apiKey: { source: "inline", value: "test-key" },
+        models: [{ modelId: "GLM-5.2" }, { modelId: "GLM-5-Turbo" }],
+        baseURL: "https://open.bigmodel.cn/api/anthropic",
+      },
+    });
+
+    // setDefault: { workspace: {...}, model: { providerId, modelId } }
+    const setDefault = client.requests[1]!;
+    expect(setDefault.params).toEqual({
+      workspace: {
+        workspaceKey: "C:\\proj\\alpha",
+        workspacePath: "C:\\proj\\alpha",
+      },
+      model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" },
+    });
+  });
+
+  it("honours an explicit workspaceKey override", async () => {
+    const client = makeFakeClient({
+      "workspace/upsertModelProvider": { ok: true },
+      "workspace/setDefaultModel": { ok: true },
+    });
+    await ensureWorkspaceModel({
+      client,
+      cwd: "/proj/alpha",
+      workspaceKey: "custom-key",
+    });
+    expect((client.requests[0]!.params.workspace as Record<string, unknown>).workspaceKey).toBe(
+      "custom-key",
+    );
+  });
+
+  it("throws a clear, actionable error when no usable provider is configured", async () => {
+    // Re-mock readZcodeConfig to return null for this case.
+    const zcodeConfig = await import("./zcode-config.js");
+    vi.spyOn(zcodeConfig, "readZcodeConfig").mockReturnValue(null);
+    const client = makeFakeClient({});
+    await expect(
+      ensureWorkspaceModel({ client, cwd: "/p" }),
+    ).rejects.toThrow(/no usable ZCode provider.*config\.json.*GUI/i);
+    // And it must NOT have sent any frames.
+    expect(client.requests).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// startZcodeProtocolTurn — schema-remapped against the live Zod schemas (#14).
+// ---------------------------------------------------------------------------
+
 describe("startZcodeProtocolTurn — method sequence", () => {
-  // ADR-0004 / #13: the app-server child self-authenticates from the user's
-  // logged-in state, so the turn driver must NOT relay any provider/key. The
-  // sequence is create/resume → (setMode) → subscribe → send — no
-  // workspace/upsertModelProvider, no workspace/setDefaultModel.
-  it("sends session/create → setMode → subscribe → send in order (no provider relay)", async () => {
+  // #14: the app-server child self-authenticates the LOGIN (session/list works
+  // with no relay), but a fresh session/create needs the workspace model
+  // configured first (the relay is the caller's once-per-boot responsibility —
+  // see ensureWorkspaceModel). The turn driver itself is create/resume →
+  // (setMode) → subscribe → send.
+  it("sends session/create → setMode → subscribe → send in order", async () => {
     const client = makeFakeClient({
       "session/create": { session: { sessionId: "s-42" } },
       "session/setMode": { ok: true },
@@ -79,7 +184,6 @@ describe("startZcodeProtocolTurn — method sequence", () => {
       onEvent: () => {},
     });
 
-    // Sequential ids prove the methods were awaited in order.
     expect(client.requests.map((r) => r.id)).toEqual([
       "zcode-1",
       "zcode-2",
@@ -92,18 +196,11 @@ describe("startZcodeProtocolTurn — method sequence", () => {
       "session/subscribe",
       "session/send",
     ]);
-    // Pin the structural absence of the deleted relay methods.
-    expect(client.requests.map((r) => r.method)).not.toContain(
-      "workspace/upsertModelProvider",
-    );
-    expect(client.requests.map((r) => r.method)).not.toContain(
-      "workspace/setDefaultModel",
-    );
     expect(result.sessionId).toBe("s-42");
     expect(typeof result.unsubscribe).toBe("function");
   });
 
-  it("passes the cwd-derived workspace to session/create", async () => {
+  it("session/create carries the workspace with workspaceKey = full cwd (live-confirmed)", async () => {
     const client = makeFakeClient({
       "session/create": { session: { sessionId: "s" } },
       "session/setMode": { ok: true },
@@ -121,12 +218,13 @@ describe("startZcodeProtocolTurn — method sequence", () => {
 
     const create = client.requests[0]!;
     expect(create.method).toBe("session/create");
+    // workspaceKey is the FULL cwd (not od-<basename>) — live-confirmed.
     expect(create.params).toEqual({
-      workspace: { workspacePath: "/proj/foo", workspaceKey: "od-foo" },
+      workspace: { workspacePath: "/proj/foo", workspaceKey: "/proj/foo" },
     });
   });
 
-  it("session/send carries the prompt and sessionId", async () => {
+  it("session/send carries { sessionId, content } — the live-confirmed schema (Q3 resolved)", async () => {
     const client = makeFakeClient({
       "session/create": { session: { sessionId: "s-7" } },
       "session/setMode": { ok: true },
@@ -143,12 +241,13 @@ describe("startZcodeProtocolTurn — method sequence", () => {
     });
 
     const send = client.requests[client.requests.length - 1]!;
+    // session/send requires ONLY { sessionId, content } — #14 Q3 resolved.
     expect(send.params).toEqual({ sessionId: "s-7", content: "do the thing" });
   });
 });
 
 describe("startZcodeProtocolTurn — session/resume", () => {
-  it("calls session/resume (not create) when resumeSessionId is given", async () => {
+  it("calls session/resume with { sessionId } only (workspace ignored by the server)", async () => {
     const client = makeFakeClient({
       "session/resume": { session: { sessionId: "old-1" } },
       "session/setMode": { ok: true },
@@ -167,6 +266,9 @@ describe("startZcodeProtocolTurn — session/resume", () => {
 
     expect(client.requests.map((r) => r.method)).toContain("session/resume");
     expect(client.requests.map((r) => r.method)).not.toContain("session/create");
+    // #14: resume schema is { sessionId } only — the server ignores workspace.
+    const resume = client.requests[0]!;
+    expect(resume.params).toEqual({ sessionId: "old-1" });
     expect(result.sessionId).toBe("old-1");
   });
 
@@ -253,8 +355,8 @@ describe("startZcodeProtocolTurn — setMode optional", () => {
   });
 });
 
-describe("startZcodeProtocolTurn — provider headers & streaming", () => {
-  it("auto-responds to requestProviderRuntimeHeaders with { headersApplied: true }", async () => {
+describe("startZcodeProtocolTurn — runtime-preferences handshake & streaming", () => {
+  it("auto-responds to session/requestRuntimePreferences with { nativeSearchEnhancementsEnabled: false } (proven issued during create/send)", async () => {
     const client = makeFakeClient({
       "session/create": { session: { sessionId: "s" } },
       "session/setMode": { ok: true },
@@ -269,14 +371,43 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
       onEvent: () => {},
     });
 
-    // Server initiates the headers handshake mid-turn.
+    // Server issues this mid-create (live-confirmed #14 probes 3, 8, 12).
+    client.notificationListener!({
+      id: "srv-prefs",
+      method: "session/requestRuntimePreferences",
+      params: { sessionId: "s", scope: "runtime-materialization" },
+    });
+
+    expect(client.responds).toEqual([
+      { id: "srv-prefs", result: { nativeSearchEnhancementsEnabled: false } },
+    ]);
+    result.unsubscribe();
+  });
+
+  it("does NOT auto-respond to interaction/requestProviderRuntimeHeaders (vestigial — not issued)", async () => {
+    const client = makeFakeClient({
+      "session/create": { session: { sessionId: "s" } },
+      "session/setMode": { ok: true },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    });
+    const result = await startZcodeProtocolTurn({
+      client,
+      cwd: "/p",
+      mode: "agent",
+      prompt: "x",
+      onEvent: () => {},
+    });
+
+    // #14 probes 3 + 12: the server NEVER issued this across two full turns.
+    // The dead handler is removed; emitting the frame must produce NO respond.
     client.notificationListener!({
       id: "srv-headers",
       method: "interaction/requestProviderRuntimeHeaders",
       params: {},
     });
 
-    expect(client.responds).toEqual([{ id: "srv-headers", result: { headersApplied: true } }]);
+    expect(client.responds).toEqual([]);
     result.unsubscribe();
   });
 
@@ -321,11 +452,8 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
       onEvent,
     });
 
-    // Before unsubscribe, the listener is registered and delivers events.
     expect(client.notificationListener).not.toBeNull();
     result.unsubscribe();
-    // After unsubscribe, the listener has been detached — a subsequent
-    // notification has no listener to reach, so onEvent cannot fire.
     expect(client.notificationListener).toBeNull();
   });
 });
