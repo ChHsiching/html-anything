@@ -461,6 +461,77 @@ export function defaultZcodeCjsPaths(): string[] {
   return [posix.join(homedir(), "Applications", "ZCode.AppImage")];
 }
 
+/**
+ * Resolve the NODE binary that drives `node <zcode.cjs> app-server` for an
+ * EXTERNAL caller (#12 / T12). `resolveZcodeBin()` above locates the `.cjs`
+ * bundle; this locates the node the `.cjs` is run with — a distinct concern,
+ * because html-anything is an external process and on a clean Windows host
+ * `where node` finds nothing (only `ZCode.exe` exists).
+ *
+ * Strategy (proven against a live clean-host probe on 2026-08-10, not guessed):
+ *   1. `ZCODE_NODE_BIN` env — explicit user override (absolute path, else PATH).
+ *   2. `node` on PATH — system Node. Preferred when present: it needs no
+ *      ELECTRON_RUN_AS_NODE env, and is the simplest portable driver.
+ *   3. The ZCode Electron executable itself. On a clean host this is the ONLY
+ *      node-like binary on the box; under `ELECTRON_RUN_AS_NODE=1` (merged into
+ *      the spawn env by the app-server branch, #11) it behaves as node. A live
+ *      `ZCode.exe <zcode.cjs> app-server` spawn with that env booted in ~1s and
+ *      answered JSON-RPC frames on the probe host. No separate `node.exe`
+ *      ships in the install tree (verified by walking it). See
+ *      {@link defaultZcodeElectronExePaths} for the per-platform exe locations.
+ *
+ * Returns `null` (never throws) when nothing is found — callers surface a clear
+ * error rather than letting the spawn fail opaquely.
+ */
+export function resolveZcodeNodeBin(): string | null {
+  const env = process.env;
+  const override = env.ZCODE_NODE_BIN?.trim();
+  if (override) {
+    if (existsSync(override)) return override;
+    const onPath = resolveOnPath(override);
+    if (onPath) return onPath;
+  }
+  const pathNode = resolveOnPath("node");
+  if (pathNode) return pathNode;
+  for (const candidate of defaultZcodeElectronExePaths()) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Per-platform candidate default paths for the ZCode Electron executable — the
+ * node-driver fallback when no system `node` is on PATH. Exported only so tests
+ * can assert the exact paths probed; callers should use `resolveZcodeNodeBin()`.
+ *
+ * Mirrors {@link defaultZcodeCjsPaths}'s separator discipline: macOS/Linux
+ * paths use `posix` separators so they stay forward-slash regardless of the
+ * host running a cross-platform unit test; Windows paths keep backslashes.
+ * The exe sits at the install root (not under `resources/glm/` like the `.cjs`):
+ *   Windows : `<installDir>\ZCode.exe` → `C:\Program Files\ZCode\ZCode.exe`
+ *   macOS   : `/Applications/ZCode.app/Contents/MacOS/ZCode`
+ *   Linux   : `~/Applications/ZCode.AppImage` (the AppImage IS the executable)
+ */
+export function defaultZcodeElectronExePaths(): string[] {
+  const platform = process.platform;
+  const env = process.env;
+  if (platform === "win32") {
+    const installDir = env.ZCODE_WINDOWS_APP_INSTALL_DIR?.trim();
+    const out: string[] = [];
+    if (installDir) {
+      out.push(win32.join(installDir, "ZCode.exe"));
+    }
+    out.push(win32.join("C:\\Program Files\\ZCode", "ZCode.exe"));
+    return out;
+  }
+  if (platform === "darwin") {
+    return [posix.join("/Applications/ZCode.app", "Contents", "MacOS", "ZCode")];
+  }
+  // Linux: the AppImage is itself the executable (and under
+  // ELECTRON_RUN_AS_NODE=1 acts as node), same path the .cjs fallback probes.
+  return [posix.join(homedir(), "Applications", "ZCode.AppImage")];
+}
+
 export type DetectedAgent = {
   id: string;
   label: string;
@@ -492,8 +563,13 @@ export function detectAgents(): DetectedAgent[] {
     // availability is driven by resolveZcodeBin() (which already honours
     // ZCODE_BIN, PATH, and platform defaults). The generic PATH branch below
     // would wrongly report `node` (bin) as the install, so ZCode gets its own
-    // detection: available iff the .cjs resolves. resolvedBin is the node bin
-    // the spawn path will use (node <cjs> app-server). The picker models are
+    // detection: available iff the .cjs resolves. resolvedBin is the node
+    // driver the spawn path will use (node <cjs> app-server) — T12 reconciles
+    // this with the invoke layer: it reports resolveZcodeNodeBin() (the real
+    // node or Electron-exe fallback) when one resolves, else the literal
+    // `node` (kept so the picker still shows the agent even on a host where
+    // node has not yet been installed; the invoke layer re-resolves at spawn
+    // time and emits a clear error if nothing is found). The picker models are
     // a.fallbackModels ([DEFAULT_MODEL]) — see ADR-0004 / #13: the child
     // self-authenticates and resolves its own model, so "Default (CLI config)"
     // is the only entry the picker needs.
@@ -504,7 +580,7 @@ export function detectAgents(): DetectedAgent[] {
           ...base,
           available: true,
           path: cjs,
-          resolvedBin: a.bin,
+          resolvedBin: resolveZcodeNodeBin() ?? a.bin,
         };
       }
       return { ...base, available: false };

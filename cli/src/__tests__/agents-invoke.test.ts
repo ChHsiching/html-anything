@@ -37,6 +37,12 @@ vi.mock("@html-anything/zcode-protocol/zcode-config", () => ({
 
 import { invokeAgent, type InvokeEvent } from "../agents-invoke.js";
 
+// win32 spawn goes through cmd.exe (shell:true), so the bin and each argv
+// element are double-quoted to survive cmd.exe's whitespace split — the same
+// discipline as next/src/lib/agents/__tests__/invoke.test.ts. Tests that assert
+// the exact spawn args use this to expect the quoted form on Windows.
+const USE_SHELL = process.platform === "win32";
+
 function makeFakeChild() {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -665,10 +671,15 @@ describe("invokeAgent", () => {
 
       const events = await eventsPromise;
 
-      // spawn called with bin + binArgs (no prompt on argv).
+      // spawn called with bin + binArgs (no prompt on argv). On win32 the bin
+      // and argv elements are quoted for cmd.exe (the T12-resolved Electron-exe
+      // path and the resolved zcode.cjs both contain spaces); on POSIX they're
+      // passed raw.
       expect(mockSpawn).toHaveBeenCalledWith(
-        "/resolved/node",
-        ["/resolved/zcode.cjs", "app-server"],
+        USE_SHELL ? `"/resolved/node"` : "/resolved/node",
+        USE_SHELL
+          ? [`"/resolved/zcode.cjs"`, `"app-server"`]
+          : ["/resolved/zcode.cjs", "app-server"],
         expect.objectContaining({ stdio: ["pipe", "pipe", "pipe"] }),
       );
 
@@ -711,7 +722,7 @@ describe("invokeAgent", () => {
       await eventsPromise;
 
       expect(mockSpawn).toHaveBeenCalledWith(
-        "/resolved/node",
+        USE_SHELL ? `"/resolved/node"` : "/resolved/node",
         expect.any(Array),
         expect.objectContaining({
           env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
@@ -944,6 +955,79 @@ describe("invokeAgent", () => {
       expect(error).toBeDefined();
       expect((error as { message?: string }).message).toMatch(/no usable ZCode provider/i);
       // No session frames sent — the relay failed fast before the turn.
+    });
+
+    // T12 (#12): external-process node resolution. On a clean host `where node`
+    // finds nothing — only the ZCode Electron executable exists. When no
+    // binOverride is passed and no system `node` is on PATH, the app-server
+    // branch must resolve the bin via resolveZcodeNodeBin() (which discovers the
+    // Electron exe), NOT fail with "not installed". ZCODE_BIN stays scoped to
+    // the .cjs (it must NOT be overloaded as the node bin) — see the
+    // reconciliation note in resolveZcodeNodeBin's doc comment.
+    it("falls back to the ZCode Electron exe when node is not on PATH (T12)", async () => {
+      const { child, stdout } = makeAppServerChild();
+      mockSpawn.mockReturnValue(child);
+      // No binOverride. existsSync admits the .cjs + the Electron exe only —
+      // resolveZcodeNodeBin() must surface the exe as the spawn bin.
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/resolved/zcode.cjs" ||
+        p === "C:\\Program Files\\ZCode\\ZCode.exe" ||
+        p === "/bin/sh",
+      );
+      vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "C:\\Program Files\\ZCode");
+      // Force the platform to win32 so the Electron-exe fallback path is probed.
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+
+      const stream = invokeAgent({ agent: "zcode", prompt: "build it" });
+
+      await new Promise((r) => setTimeout(r, 0));
+      const eventsPromise = collectStream(stream);
+      stdout.write(
+        `${JSON.stringify({
+          method: "session/event",
+          params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+        })}\n`,
+      );
+      stdout.end();
+      await new Promise((r) => setImmediate(r));
+      child.emit("close", 0);
+      await eventsPromise;
+
+      // The decisive assertion: spawn was called with the Electron exe as bin
+      // (quoted on win32 — the path contains a space). argv is quoted too but
+      // we only assert the bin + env here.
+      expect(mockSpawn).toHaveBeenCalledWith(
+        USE_SHELL ? `"C:\\Program Files\\ZCode\\ZCode.exe"` : "C:\\Program Files\\ZCode\\ZCode.exe",
+        expect.any(Array),
+        expect.objectContaining({
+          env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
+        }),
+      );
+    });
+
+    // T12 (#12): graceful degradation. When NEITHER a node NOR the Electron exe
+    // can be found (e.g. ZCode uninstalled, no system node), the adapter must
+    // emit a clear, actionable error — not a silent hang or an opaque
+    // "node not installed". The error names the node resolution problem and
+    // points at the fallback knobs (ZCODE_NODE_BIN / install ZCode).
+    it("emits a clear error when no node AND no Electron exe can be found (T12)", async () => {
+      // No binOverride; existsSync admits only the .cjs (no node, no exe).
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/resolved/zcode.cjs" || p === "/bin/sh",
+      );
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+
+      const stream = invokeAgent({ agent: "zcode", prompt: "p" });
+      const events = await collectStream(stream);
+
+      // spawn must NEVER have been called — we failed before spawning.
+      expect(mockSpawn).not.toHaveBeenCalled();
+      const error = events.find((e) => e.type === "error");
+      expect(error).toBeDefined();
+      const msg = (error as { message?: string }).message ?? "";
+      // Names the node resolution problem and points at the fallback knobs.
+      expect(msg).toMatch(/node/i);
+      expect(msg).toMatch(/ZCODE_NODE_BIN|ZCode/i);
     });
   });
 });

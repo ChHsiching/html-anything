@@ -469,6 +469,69 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     expect(error).toBeDefined();
     expect((error as { message?: string }).message).toMatch(/no usable ZCode provider/i);
   });
+
+  // T12 (#12): external-process node resolution. On a clean host `where node`
+  // finds nothing — only the ZCode Electron executable exists. When no
+  // binOverride is passed and no system `node` is on PATH, the app-server
+  // branch must resolve the bin via resolveZcodeNodeBin() (which discovers the
+  // Electron exe), NOT fail with "not installed". ZCODE_BIN stays scoped to the
+  // .cjs (not overloaded as the node bin).
+  it("falls back to the ZCode Electron exe when node is not on PATH (T12)", async () => {
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+    existsSyncDelegate.mockImplementation((p: string) =>
+      p === "/resolved/zcode.cjs" ||
+      p === "C:\\Program Files\\ZCode\\ZCode.exe" ||
+      p === "/bin/sh",
+    );
+    vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "C:\\Program Files\\ZCode");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+
+    const stream = invokeAgent({ agent: "zcode", prompt: "build it" });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+    await eventsPromise;
+
+    // The decisive assertion: spawn was called with the Electron exe as bin
+    // (quoted on win32 because the path contains a space).
+    expect(mockSpawn).toHaveBeenCalledWith(
+      USE_SHELL ? `"C:\\Program Files\\ZCode\\ZCode.exe"` : "C:\\Program Files\\ZCode\\ZCode.exe",
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
+      }),
+    );
+  });
+
+  // T12 (#12): graceful degradation. When NEITHER a node NOR the Electron exe
+  // can be found, the adapter must emit a clear, actionable error — not a
+  // silent hang or an opaque "node not installed".
+  it("emits a clear error when no node AND no Electron exe can be found (T12)", async () => {
+    existsSyncDelegate.mockImplementation((p: string) =>
+      p === "/resolved/zcode.cjs" || p === "/bin/sh",
+    );
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+
+    const stream = invokeAgent({ agent: "zcode", prompt: "p" });
+    const events = await collectStream(stream);
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    const msg = (error as { message?: string }).message ?? "";
+    expect(msg).toMatch(/node/i);
+    expect(msg).toMatch(/ZCODE_NODE_BIN|ZCode/i);
+  });
 });
 
 // Regression guards for the argv branch — keep parity with the pre-T6 behavior

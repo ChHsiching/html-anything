@@ -6,6 +6,8 @@
 // The node environment is correct for a discovery/PATH unit test and matches
 // how cli runs the same seam (see invoke.test.ts).
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const { existsSyncMock } = vi.hoisted(() => ({
   existsSyncMock: vi.fn((_path?: string) => false),
@@ -21,6 +23,7 @@ import {
   DEFAULT_MODEL,
   detectAgents,
   resolveZcodeBin,
+  resolveZcodeNodeBin,
   type AgentDef,
   type AgentProtocol,
 } from "../detect";
@@ -153,6 +156,30 @@ describe("ZCode agent registration (T7)", () => {
     expect(zcode.unsupported).toBeUndefined();
   });
 
+  // T12 (#12): detection reports the ACTUAL node driver when one resolves, not
+  // just the literal "node". On a clean host where only the ZCode Electron exe
+  // exists, resolvedBin must point at it — reconciling the detection layer
+  // with the invoke layer's resolveZcodeNodeBin() (no conflicting assumption
+  // that detect says "node" while invoke spawns ZCode.exe).
+  it("detectAgents() reports the resolved Electron exe as resolvedBin when no system node (T12)", () => {
+    vi.stubEnv("ZCODE_BIN", "/resolved/zcode.cjs");
+    vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "C:\\Program Files\\ZCode");
+    stubPlatform("win32");
+    existsSyncMock.mockImplementation(
+      (p) =>
+        p === "/resolved/zcode.cjs" ||
+        p === "C:\\Program Files\\ZCode\\ZCode.exe",
+    );
+
+    const agents = detectAgents();
+    const zcode = findAgent(agents, "zcode");
+
+    expect(zcode.available).toBe(true);
+    expect(zcode.path).toBe("/resolved/zcode.cjs");
+    // The Electron exe is what the spawn will actually use as "node".
+    expect(zcode.resolvedBin).toBe("C:\\Program Files\\ZCode\\ZCode.exe");
+  });
+
   // ADR-0004 / #13 Q1: fallbackModels for the ZCode picker come from the
   // AgentDef.fallbackModels static floor ([DEFAULT_MODEL]), NOT from a read
   // of ~/.zcode/v2/model-providers.json. The child self-authenticates and
@@ -180,5 +207,89 @@ describe("ZCode agent registration (T7)", () => {
     existsSyncMock.mockImplementation((p) => p === "/custom/zcode.cjs");
 
     expect(resolveZcodeBin()).toBe("/custom/zcode.cjs");
+  });
+});
+
+// T12: resolve the node binary that drives `node <zcode.cjs> app-server` for
+// an EXTERNAL caller. html-anything is an external process; on a clean Windows
+// host `where node` finds nothing (only ZCode.exe exists). resolveZcodeBin()
+// locates the .cjs bundle; this layer locates the NODE the .cjs runs under.
+// Strategy (live-proven, not guessed): prefer real node on PATH; fall back to
+// the ZCode Electron executable (ZCode.exe / ZCode / AppImage) driven under
+// ELECTRON_RUN_AS_NODE=1 by the spawn branch (#11). A live spawn of
+// `ZCode.exe <zcode.cjs> app-server` with ELECTRON_RUN_AS_NODE=1 booted and
+// answered JSON-RPC on this host — no separate node.exe ships in the tree.
+describe("resolveZcodeNodeBin (T12)", () => {
+  it("ZCODE_NODE_BIN absolute path that exists wins over all defaults", () => {
+    vi.stubEnv("ZCODE_NODE_BIN", "C:\\custom\\node.exe");
+    stubPlatform("win32");
+    existsSyncMock.mockImplementation((p) => p === "C:\\custom\\node.exe");
+
+    expect(resolveZcodeNodeBin()).toBe("C:\\custom\\node.exe");
+  });
+
+  it("ZCODE_NODE_BIN command name resolves on PATH when not absolute", () => {
+    const dir = "/opt/node-shim";
+    const expected = join(dir, "my-node");
+    vi.stubEnv("ZCODE_NODE_BIN", "my-node");
+    vi.stubEnv("PATH", dir);
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation((p) => p === expected);
+
+    expect(resolveZcodeNodeBin()).toBe(expected);
+  });
+
+  it("prefers a real `node` on PATH over the Electron fallback", () => {
+    const dir = "/opt/realnode";
+    const expected = join(dir, "node");
+    vi.stubEnv("PATH", dir);
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation((p) => p === expected || p === "/opt/zcode/ZCode");
+
+    expect(resolveZcodeNodeBin()).toBe(expected);
+  });
+
+  it("Windows: falls back to ZCode.exe next to the resolved .cjs install", () => {
+    vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "C:\\Program Files\\ZCode");
+    stubPlatform("win32");
+    existsSyncMock.mockImplementation(
+      (p) => p === "C:\\Program Files\\ZCode\\ZCode.exe",
+    );
+
+    expect(resolveZcodeNodeBin()).toBe("C:\\Program Files\\ZCode\\ZCode.exe");
+  });
+
+  it("Windows: honours a custom ZCODE_WINDOWS_APP_INSTALL_DIR for the .exe", () => {
+    vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "D:\\ZCode");
+    stubPlatform("win32");
+    existsSyncMock.mockImplementation((p) => p === "D:\\ZCode\\ZCode.exe");
+
+    expect(resolveZcodeNodeBin()).toBe("D:\\ZCode\\ZCode.exe");
+  });
+
+  it("macOS: falls back to ZCode.app/Contents/MacOS/ZCode", () => {
+    stubPlatform("darwin");
+    existsSyncMock.mockImplementation(
+      (p) => p === "/Applications/ZCode.app/Contents/MacOS/ZCode",
+    );
+
+    expect(resolveZcodeNodeBin()).toBe(
+      "/Applications/ZCode.app/Contents/MacOS/ZCode",
+    );
+  });
+
+  it("Linux: falls back to the AppImage mount", () => {
+    stubPlatform("linux");
+    const expected = `${homedir()}/Applications/ZCode.AppImage`;
+    existsSyncMock.mockImplementation((p) => p === expected);
+
+    expect(resolveZcodeNodeBin()).toBe(expected);
+  });
+
+  it("returns null when nothing is found (no throw)", () => {
+    stubPlatform("darwin");
+    existsSyncMock.mockReturnValue(false);
+
+    expect(resolveZcodeNodeBin()).toBeNull();
   });
 });

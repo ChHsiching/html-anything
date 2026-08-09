@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { resolveOnPath, resolveZcodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef, type AgentProtocol } from "./agents-detect.js";
+import { resolveOnPath, resolveZcodeBin, resolveZcodeNodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef, type AgentProtocol } from "./agents-detect.js";
 import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
 import { ensureWorkspaceModel, startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
 
@@ -68,6 +68,20 @@ type AgentArgvOpts = {
   model?: string;
   openclawAgentId?: string;
 };
+
+/**
+ * Quote a single argv element for cmd.exe when `spawn(..., { shell: true })` is
+ * used on Windows. cmd.exe splits the argv array on whitespace, so an element
+ * containing a space — notably ZCode's resolved `C:\Program
+ * Files\ZCode\ZCode.exe` (the T12 Electron-exe fallback) and the resolved
+ * `C:\Program Files\ZCode\resources\glm\zcode.cjs` — must be double-quoted.
+ * Already-quoted elements are left alone; empty elements become `""`. Mirrors
+ * next/src/lib/agents/invoke.ts's helper.
+ */
+function quoteWindowsArg(arg: string): string {
+  if (arg.length > 0 && arg.startsWith('"') && arg.endsWith('"')) return arg;
+  return `"${arg}"`;
+}
 
 class UnsupportedAgentProtocolError extends Error {
   constructor(public readonly agent: string, public readonly protocol: string) {
@@ -444,6 +458,47 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   if (!def) {
     return errorStream(`unknown agent: ${opts.agent}`);
   }
+
+  // T12 (#12): app-server agents (ZCode) spawn `node <zcode.cjs> app-server`,
+  // and html-anything is an EXTERNAL process — on a clean Windows host `where
+  // node` finds nothing. The generic resolveBinForAgent() path treats
+  // `def.bin = "node"` as a PATH lookup and treats ZCODE_BIN (def.envOverride)
+  // as the bin override, but ZCODE_BIN is the .cjs override, NOT a node bin.
+  // So app-server gets its OWN bin resolution: binOverride (explicit node path)
+  // wins; otherwise resolveZcodeNodeBin() discovers node-or-Electron-exe (see
+  // its doc comment for the live-proven strategy). Reconciles with
+  // resolveZcodeBin() — they own disjoint concerns (.cjs vs node driver).
+  if (def.protocol === "app-server") {
+    let bin: string | null = null;
+    if (opts.binOverride && opts.binOverride.trim()) {
+      const tried = opts.binOverride.trim();
+      if (/^([a-zA-Z]:[\\/]|[\\/])/.test(tried)) {
+        bin = existsSync(tried) ? tried : null;
+      } else if (tried.includes("/") || tried.includes("\\") || tried.startsWith(".")) {
+        const abs = path.resolve(tried);
+        bin = existsSync(abs) ? abs : null;
+      } else {
+        bin = resolveOnPath(tried);
+      }
+      if (!bin) {
+        return errorStream(
+          `${def.label}: custom node path \`${tried}\` does not exist. Set it to a node binary (or ZCode's ZCode.exe), or clear it to auto-discover.`,
+        );
+      }
+    } else {
+      bin = resolveZcodeNodeBin();
+      if (!bin) {
+        return errorStream(
+          `${def.label}: could not find a node binary to drive zcode.cjs. ` +
+            `Install Node.js, point ZCODE_NODE_BIN at a node/ZCode.exe path, ` +
+            `or install ZCode so its bundled Electron executable can be used ` +
+            `(under ELECTRON_RUN_AS_NODE=1).`,
+        );
+      }
+    }
+    return invokeAppServerAgent({ def, bin, opts });
+  }
+
   const resolved = resolveBinForAgent(def, opts.binOverride);
   if (resolved.kind === "override-missing") {
     return errorStream(
@@ -458,10 +513,6 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   const bin: string = resolved.bin;
 
   const env = envFor(opts.agent);
-
-  if (def.protocol === "app-server") {
-    return invokeAppServerAgent({ def, bin, opts });
-  }
 
   const promptViaArgv = def.protocol === "argv";
   const promptViaMessageFlag = def.protocol === "argv-message";
@@ -726,12 +777,25 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       const env = { ...envFor(opts.agent), ELECTRON_RUN_AS_NODE: "1" };
 
       try {
-        child = spawn(bin, argv, {
-          cwd: opts.cwd ?? process.cwd(),
-          env,
-          stdio: ["pipe", "pipe", "pipe"],
-          shell: process.platform === "win32",
-        });
+        // Same Windows `.cmd`/`.bat` shim handling as the argv branch + the
+        // next mirror: quote the bin and run through a shell on win32 so `node`
+        // (or the T12-resolved ZCode.exe) resolves a `.cmd` wrapper when one
+        // exists. Both the bin and each argv element are quoted, so paths with
+        // spaces (the resolved `C:\Program Files\ZCode\ZCode.exe` node fallback
+        // and the `C:\Program Files\ZCode\...\zcode.cjs`) survive cmd.exe's
+        // whitespace split.
+        const useShell = process.platform === "win32";
+        child = spawn(
+          useShell ? `"${bin}"` : bin,
+          useShell ? argv.map(quoteWindowsArg) : argv,
+          {
+            cwd: opts.cwd ?? process.cwd(),
+            env,
+            stdio: ["pipe", "pipe", "pipe"],
+            shell: useShell,
+            windowsVerbatimArguments: false,
+          },
+        );
       } catch (err) {
         safeEnqueue({
           type: "error",

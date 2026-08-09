@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolveOnPath, resolveOpenclawAgentId, resolveZcodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef } from "./detect";
+import path from "node:path";
+import { resolveOnPath, resolveOpenclawAgentId, resolveZcodeBin, resolveZcodeNodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef } from "./detect";
 import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError, rescueHtmlFromToolUse } from "./argv";
 import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
 import { ensureWorkspaceModel, startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
@@ -97,6 +98,47 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   if (!def) {
     return errorStream(`unknown agent: ${opts.agent}`);
   }
+
+  // T12 (#12): app-server agents (ZCode) spawn `node <zcode.cjs> app-server`,
+  // and html-anything is an EXTERNAL process — on a clean Windows host `where
+  // node` finds nothing. The generic resolveBinForAgent() path treats
+  // `def.bin = "node"` as a PATH lookup and treats ZCODE_BIN (def.envOverride)
+  // as the bin override, but ZCODE_BIN is the .cjs override, NOT a node bin.
+  // So app-server gets its OWN bin resolution: binOverride (explicit node path)
+  // wins; otherwise resolveZcodeNodeBin() discovers node-or-Electron-exe (see
+  // its doc comment for the live-proven strategy). Reconciles with
+  // resolveZcodeBin() — they own disjoint concerns (.cjs vs node driver).
+  if (def.protocol === "app-server") {
+    let bin: string | null = null;
+    if (opts.binOverride && opts.binOverride.trim()) {
+      const tried = opts.binOverride.trim();
+      if (/^([a-zA-Z]:[\\/]|[\\/])/.test(tried)) {
+        bin = existsSync(tried) ? tried : null;
+      } else if (tried.includes("/") || tried.includes("\\") || tried.startsWith(".")) {
+        const abs = path.resolve(tried);
+        bin = existsSync(abs) ? abs : null;
+      } else {
+        bin = resolveOnPath(tried);
+      }
+      if (!bin) {
+        return errorStream(
+          `${def.label}: custom node path \`${tried}\` does not exist. Update or clear it in Settings → Custom path.`,
+        );
+      }
+    } else {
+      bin = resolveZcodeNodeBin();
+      if (!bin) {
+        return errorStream(
+          `${def.label}: could not find a node binary to drive zcode.cjs. ` +
+            `Install Node.js, point ZCODE_NODE_BIN at a node/ZCode.exe path, ` +
+            `or install ZCode so its bundled Electron executable can be used ` +
+            `(under ELECTRON_RUN_AS_NODE=1).`,
+        );
+      }
+    }
+    return invokeAppServerAgent({ def, bin, opts });
+  }
+
   const resolved = resolveBinForAgent(def, opts.binOverride);
   if (resolved.kind === "override-missing") {
     return errorStream(
@@ -109,15 +151,6 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     );
   }
   const bin: string = resolved.bin;
-
-  // app-server protocol agents (ZCode) take a different path: a single
-  // JSON-RPC turn over stdio driven by the shared zcode-protocol layer, not
-  // the line-parsed stdout loop below. Mirror cli's T5 — see ADR-0002
-  // decision 2 for why ZCode's wire format is not the ACP JSON-RPC the
-  // hermes/kimi family speaks.
-  if (def.protocol === "app-server") {
-    return invokeAppServerAgent({ def, bin, opts });
-  }
 
   // For openclaw we need an async detection step (resolveOpenclawAgentId)
   // before buildArgv. Do all of the argv assembly inside the stream's async
