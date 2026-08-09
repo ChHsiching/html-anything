@@ -435,6 +435,16 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
         safeClose();
       };
 
+      // ZCode's zcode.cjs is an Electron-hosted bundle; without
+      // ELECTRON_RUN_AS_NODE=1 it initializes Electron components and hangs at
+      // boot, answering no JSON-RPC frame. This is ZCode's own standard way to
+      // run a Node child outside a BrowserWindow (zcode.cjs itself spawns its
+      // children with this env at four call sites). The var is merged INTO the
+      // envFor(...) env so the rest of the process env (PATH, ZCODE_*, …)
+      // survives — not a replacement. Scoped to the app-server branch: other
+      // agents must not inherit it. (ADR-0004 / T9.)
+      const env = { ...envFor(opts.agent), ELECTRON_RUN_AS_NODE: "1" };
+
       try {
         // Same Windows `.cmd`/`.bat` shim handling as the argv branch: quote
         // the bin and run through a shell on win32 so `node` resolves a
@@ -447,7 +457,7 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           useShell ? argv.map(quoteWindowsArg) : argv,
           {
             cwd: opts.cwd ?? process.cwd(),
-            env: envFor(opts.agent),
+            env,
             stdio: ["pipe", "pipe", "pipe"],
             shell: useShell,
             windowsVerbatimArguments: false,

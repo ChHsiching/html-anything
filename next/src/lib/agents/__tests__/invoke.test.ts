@@ -202,6 +202,45 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     });
   });
 
+  // ADR-0004 / T9: without ELECTRON_RUN_AS_NODE=1 the zcode.cjs child hangs
+  // at Electron-component init. The env must be merged INTO envFor(...) (so
+  // the rest of the process env survives), not replace it. spawn is mocked,
+  // so this pins the fact without a real server. Mirrors the cli test seam.
+  it("spawns with ELECTRON_RUN_AS_NODE=1 merged into the env", async () => {
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "build it",
+      binOverride: "/resolved/node",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    // End the turn so the stream closes.
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+
+    await eventsPromise;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      USE_SHELL ? `"/resolved/node"` : "/resolved/node",
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
+      }),
+    );
+  });
+
   it("bridges a text_delta notification to {type:'delta'}", async () => {
     const { child, stdout } = makeAppServerChild();
     mockSpawn.mockReturnValue(child);
