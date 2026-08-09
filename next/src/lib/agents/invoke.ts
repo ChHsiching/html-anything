@@ -2,7 +2,6 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolveOnPath, resolveOpenclawAgentId, resolveZcodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef } from "./detect";
 import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError, rescueHtmlFromToolUse } from "./argv";
-import { readZcodeConfig } from "@html-anything/zcode-protocol/zcode-config";
 import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
 import { startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
 
@@ -372,15 +371,12 @@ type AppServerInvokeArgs = {
 };
 
 function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): ReadableStream<InvokeEvent> {
-  // The saved API-key provider selection from ~/.zcode/v2/. Without it we can't
-  // configure the workspace, so there's no point spawning the server.
-  const providerSelection = readZcodeConfig();
-  if (!providerSelection) {
-    return errorStream(
-      `${def.label}: no saved model provider found in ~/.zcode/v2/model-providers.json. ` +
-        `Open the ZCode GUI, sign in to a provider, and retry.`,
-    );
-  }
+  // ADR-0004 / #13: the app-server child self-authenticates from the user's
+  // logged-in state — it resolves the Coding Plan entitlement on its own. The
+  // adapter spawns, drives, and parses; it provisions NO provider/key. The
+  // previous readZcodeConfig() → "no saved provider" short-circuit is deleted:
+  // there is no credential to gate on. The only precondition is the install
+  // existing (checked above in invokeAgent before this branch).
 
   // binArgs carries the leading argv a node-script CLI needs (e.g.
   // [ZCODE_CJS_SENTINEL, "app-server"]). The prompt is NOT piped to stdin — it
@@ -569,7 +565,6 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           client,
           cwd: opts.cwd ?? process.cwd(),
           prompt: opts.prompt,
-          providerSelection,
           onEvent,
           signal: opts.signal,
         });

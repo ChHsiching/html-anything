@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join, posix, win32 } from "node:path";
-import { readZcodeConfig } from "@html-anything/zcode-protocol/zcode-config";
 
 /**
  * Agent detection — adapted from next/src/lib/agents/detect.ts
@@ -315,11 +314,14 @@ export const AGENTS: AgentDef[] = [
   // its CLI is a node bundle (zcode.cjs) spawned as `node <cjs> app-server`,
   // so bin: "node" and binArgs carries the node-script leading argv. The
   // `<resolved-zcode-cjs>` sentinel is filled by resolveZcodeBin() at detect
-  // time (availability) and invoke time (the actual spawn). fallbackModels
-  // here is the static floor; detectAgents() merges the saved provider's GLM
-  // models on top (see readZcodeConfig). protocol "app-server" IS implemented
-  // (T5/T6), so this entry is never marked unsupported — distinct from the
-  // acp/pi-rpc detection-only family above. See ADR-0002 decision 2.
+  // time (availability) and invoke time (the actual spawn). protocol
+  // "app-server" IS implemented (T5/T6), so this entry is never marked
+  // unsupported — distinct from the acp/pi-rpc detection-only family above.
+  // fallbackModels is the static [DEFAULT_MODEL] floor: a live probe
+  // (ADR-0004 / #13) proved the child self-authenticates and resolves its own
+  // model, AND that no protocol method exposes a model list, so the picker
+  // only needs "Default (CLI config)" — send no --model, let the child's
+  // resolved entitlement win. See ADR-0002 decision 2.
   {
     id: "zcode",
     label: "ZCode",
@@ -471,19 +473,6 @@ export type DetectedAgent = {
   unsupported?: boolean;
 };
 
-/**
- * Build the model picker list for ZCode: the saved provider's GLM models (from
- * `~/.zcode/v2/model-providers.json` via the T1 config reader) appended after
- * `DEFAULT_MODEL`, so the user can switch variants. Only called when the
- * install is available, so we don't touch the config file for an agent that
- * can't run anyway. Other agents use their static `fallbackModels` verbatim.
- */
-function zcodeModels(): ModelOption[] {
-  const config = readZcodeConfig();
-  const extra = config?.models ?? [];
-  return [DEFAULT_MODEL, ...extra.map((m) => ({ id: m, label: m }))];
-}
-
 export function detectAgents(): DetectedAgent[] {
   return AGENTS.map((a): DetectedAgent => {
     const protocol = a.protocol ?? "stdin";
@@ -504,14 +493,15 @@ export function detectAgents(): DetectedAgent[] {
     // ZCODE_BIN, PATH, and platform defaults). The generic PATH branch below
     // would wrongly report `node` (bin) as the install, so ZCode gets its own
     // detection: available iff the .cjs resolves. resolvedBin is the node bin
-    // the spawn path will use (node <cjs> app-server). The saved provider's
-    // models are read only when available.
+    // the spawn path will use (node <cjs> app-server). The picker models are
+    // a.fallbackModels ([DEFAULT_MODEL]) — see ADR-0004 / #13: the child
+    // self-authenticates and resolves its own model, so "Default (CLI config)"
+    // is the only entry the picker needs.
     if (protocol === "app-server") {
       const cjs = resolveZcodeBin();
       if (cjs) {
         return {
           ...base,
-          models: zcodeModels(),
           available: true,
           path: cjs,
           resolvedBin: a.bin,

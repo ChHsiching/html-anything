@@ -1,20 +1,24 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { createZcodeProtocolClient } from "./zcode-protocol.js";
 import { startZcodeProtocolTurn } from "./zcode-session.js";
-import type { ZcodeConfig } from "./zcode-config.js";
 
 /**
  * End-to-end integration seam (issue #5, criterion 5): drive
  * `startZcodeProtocolTurn` through a REAL `createZcodeProtocolClient` whose
  * child is a `PassThrough`-backed fake. Unlike the per-module unit tests
- * (which mock the client or feed frames directly), this one proves the three
+ * (which mock the client or feed frames directly), this one proves the
  * modules compose over real JSON-RPC framing: every request the turn driver
  * issues is an actual newline-delimited JSON object on child.stdin, and every
  * forged response + notification we emit on child.stdout is parsed by the real
  * client and routed back.
+ *
+ * ADR-0004 / #13: the app-server child self-authenticates from the user's
+ * logged-in state, so the turn is create → (setMode) → subscribe → send. No
+ * provider/key relay occurs — this integration seam pins that the real wire
+ * frames contain no workspace/upsertModelProvider or workspace/setDefaultModel.
  *
  * To make this deterministic without racing the async sequence, we tap
  * child.stdin: each time the client writes a request frame, a scripted responder
@@ -34,21 +38,8 @@ function makeChild(): FakeChild {
   return emitter as unknown as FakeChild;
 }
 
-const PROVIDER: ZcodeConfig = {
-  provider: "builtin:zai",
-  model: "glm-5.1",
-  models: ["glm-5.1"],
-  providerRecord: {
-    providerId: "builtin:zai",
-    kind: "openai-compatible",
-    baseURL: "https://api.z.ai/api/coding/paas/v4",
-    apiKey: { source: "inline", value: "test-key" },
-    models: [{ modelId: "glm-5.1" }],
-  },
-};
-
 describe("startZcodeProtocolTurn — end-to-end over a real protocol client", () => {
-  it("drives the full 6-method turn and delivers a text_delta to onEvent", async () => {
+  it("drives the turn (no provider relay) and delivers a text_delta to onEvent", async () => {
     const child = makeChild();
     const client = createZcodeProtocolClient(child);
 
@@ -56,8 +47,6 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
     // to each request by method, so the turn driver's awaits resolve in order.
     const outbound: { id: string; method: string }[] = [];
     const responses: Record<string, Record<string, unknown>> = {
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "e2e-1" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -86,19 +75,23 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
       cwd: "/proj/alpha",
       mode: "agent",
       prompt: "write the thing",
-      providerSelection: PROVIDER,
       onEvent: (e) => events.push(e),
     });
 
-    // The 6-method sequence was sent, in order, as real JSON-RPC frames.
+    // The post-#13 sequence was sent, in order, as real JSON-RPC frames —
+    // with the provider relay structurally absent.
     expect(outbound.map((f) => f.method)).toEqual([
-      "workspace/upsertModelProvider",
-      "workspace/setDefaultModel",
       "session/create",
       "session/setMode",
       "session/subscribe",
       "session/send",
     ]);
+    expect(outbound.map((f) => f.method)).not.toContain(
+      "workspace/upsertModelProvider",
+    );
+    expect(outbound.map((f) => f.method)).not.toContain(
+      "workspace/setDefaultModel",
+    );
     expect(turn.sessionId).toBe("e2e-1");
 
     // Now inject an asynchronous content notification on the real stdout path.
@@ -122,8 +115,6 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
     const client = createZcodeProtocolClient(child);
 
     const responses: Record<string, Record<string, unknown>> = {
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "e2e-2" } },
       "session/subscribe": { ok: true },
       "session/send": { ok: true },
@@ -147,7 +138,6 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
       client,
       cwd: "/proj/beta",
       prompt: "p",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 
@@ -178,8 +168,6 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
     const client = createZcodeProtocolClient(child);
 
     const responses: Record<string, Record<string, unknown>> = {
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "e2e-3" } },
       "session/subscribe": { ok: true },
       "session/send": { ok: true },
@@ -203,7 +191,6 @@ describe("startZcodeProtocolTurn — end-to-end over a real protocol client", ()
       client,
       cwd: "/proj/gamma",
       prompt: "p",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 

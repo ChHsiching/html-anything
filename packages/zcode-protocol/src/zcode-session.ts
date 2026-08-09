@@ -1,25 +1,29 @@
 /**
- * Drives one full `app-server` turn over the JSON-RPC client: configure the
- * model provider, open (or resume) a session, subscribe, and send the prompt.
+ * Drives one full `app-server` turn over the JSON-RPC client: open (or resume)
+ * a session, subscribe, and send the prompt.
  *
- * The sequence is the heart of the ZCode app-server protocol (see ADR-0001 →
- * "ZCode app-server protocol"):
+ * ADR-0004 / #13: the app-server child **self-authenticates** from the user's
+ * logged-in state — it resolves the BigModel Coding Plan entitlement on its
+ * own at boot, with no client-side provider/key relay. A live probe
+ * (2026-08-10) confirmed a bare `session/list` returns the logged-in user's
+ * real sessions with zero credential handling. The previous
+ * `workspace/upsertModelProvider` + `workspace/setDefaultModel` relay is
+ * deleted: it was dead weight (the child was always authed) and worse, it was
+ * the root of the "Coding Plan can't be served" failure (the old
+ * `parseProvider` rejected `apiKey:""` entries, which is exactly what Coding
+ * Plan entries legitimately have, so it picked the wrong provider entirely).
  *
- *   1. `workspace/upsertModelProvider` — register the saved API-key provider
- *      on the workspace. The app-server validates `provider` as an object
- *      (`{ providerId, kind, apiKey, models }`), so we send the full
- *      {@link ZcodeConfig.providerRecord}, not the bare id.
- *   2. `workspace/setDefaultModel` — make the provider's model the active one
- *      for the workspace. `model` is validated as `{ modelId, providerId }`.
- *   3. `session/create` (or `session/resume` when `resumeSessionId` is given)
- *      — open the session; the response carries the `sessionId`. The server
- *      issues a `session/requestRuntimePreferences` server→client request
- *      mid-create and blocks the create response on its reply; we answer it
- *      with `{ nativeSearchEnhancementsEnabled: false }`.
- *   4. `session/setMode` — only when a non-empty `mode` is supplied.
- *   5. `session/subscribe` — register this client for the session's event
+ * The post-#13 sequence is:
+ *   1. `session/create` (or `session/resume` when `resumeSessionId` is given)
+ *      — open the session against the child's already-resolved auth; the
+ *      response carries the `sessionId`. The server may issue a
+ *      `session/requestRuntimePreferences` server→client request mid-create
+ *      and block the create response on its reply; we answer it with
+ *      `{ nativeSearchEnhancementsEnabled: false }`.
+ *   2. `session/setMode` — only when a non-empty `mode` is supplied.
+ *   3. `session/subscribe` — register this client for the session's event
  *      stream (delivery kind selects how events arrive).
- *   6. `session/send` — deliver the prompt. After this, model output arrives
+ *   4. `session/send` — deliver the prompt. After this, model output arrives
  *      asynchronously as notifications.
  *
  * While the turn runs, this driver subscribes to the client's notification
@@ -34,7 +38,6 @@
 import path from "node:path";
 
 import { isRecord, type JsonRecord } from "./internal.js";
-import type { ZcodeConfig } from "./zcode-config.js";
 import type {
   ZcodeNotificationListener,
   ZcodeProtocolRequest,
@@ -72,8 +75,6 @@ export interface StartZcodeProtocolTurnOptions {
   onEvent: (event: ZcodeEvent) => void;
   /** The user's prompt, sent via `session/send`. */
   prompt: string;
-  /** The saved API-key provider selection, read from `~/.zcode/v2/`. */
-  providerSelection: ZcodeConfig;
   /** Per-request timeout forwarded to the client. */
   requestTimeoutMs?: number;
   /**
@@ -167,7 +168,6 @@ export async function startZcodeProtocolTurn({
   mode,
   onEvent,
   prompt,
-  providerSelection,
   requestTimeoutMs,
   resumeSessionId,
   signal,
@@ -210,21 +210,6 @@ export async function startZcodeProtocolTurn({
 
   try {
     const workspace = workspaceFor(cwd, workspaceKey);
-    // The app-server validates `provider` and `model` as objects, not bare
-    // id strings (ZodError "expected object, received string"). `provider`
-    // is the full record from the saved config; `model` is the default
-    // model pinned to its provider.
-    await request("workspace/upsertModelProvider", {
-      workspace,
-      provider: providerSelection.providerRecord,
-    });
-    await request("workspace/setDefaultModel", {
-      workspace,
-      model: {
-        modelId: providerSelection.model,
-        providerId: providerSelection.provider,
-      },
-    });
 
     const trimmedResumeSessionId = resumeSessionId?.trim() || null;
     let sessionId: string;

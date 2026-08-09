@@ -1,11 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ZcodeProtocolClientLike } from "./zcode-session.js";
-import type { ZcodeConfig } from "./zcode-config.js";
 import { startZcodeProtocolTurn } from "./zcode-session.js";
 
 /**
  * A fake protocol client. It records every `request`/`respond` call in order
- * so a test can assert the 6-method sequence and its parameters, and it returns
+ * so a test can assert the method sequence and its parameters, and it returns
  * scripted responses (by method) to drive the turn forward. The
  * `onNotification` subscription is captured so a test can later invoke the
  * registered listener with forged frames.
@@ -59,24 +58,13 @@ function makeFakeClient(
   }) as FakeClient;
 }
 
-const PROVIDER: ZcodeConfig = {
-  provider: "builtin:zai",
-  model: "glm-5.1",
-  models: ["glm-5.1"],
-  providerRecord: {
-    providerId: "builtin:zai",
-    kind: "openai-compatible",
-    baseURL: "https://api.z.ai/api/coding/paas/v4",
-    apiKey: { source: "inline", value: "test-key" },
-    models: [{ modelId: "glm-5.1" }],
-  },
-};
-
 describe("startZcodeProtocolTurn — method sequence", () => {
-  it("sends upsertModelProvider → setDefaultModel → session/create → setMode → subscribe → send in order", async () => {
+  // ADR-0004 / #13: the app-server child self-authenticates from the user's
+  // logged-in state, so the turn driver must NOT relay any provider/key. The
+  // sequence is create/resume → (setMode) → subscribe → send — no
+  // workspace/upsertModelProvider, no workspace/setDefaultModel.
+  it("sends session/create → setMode → subscribe → send in order (no provider relay)", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s-42" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -88,7 +76,6 @@ describe("startZcodeProtocolTurn — method sequence", () => {
       cwd: "/proj/foo",
       mode: "agent",
       prompt: "hello world",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 
@@ -98,25 +85,26 @@ describe("startZcodeProtocolTurn — method sequence", () => {
       "zcode-2",
       "zcode-3",
       "zcode-4",
-      "zcode-5",
-      "zcode-6",
     ]);
     expect(client.requests.map((r) => r.method)).toEqual([
-      "workspace/upsertModelProvider",
-      "workspace/setDefaultModel",
       "session/create",
       "session/setMode",
       "session/subscribe",
       "session/send",
     ]);
+    // Pin the structural absence of the deleted relay methods.
+    expect(client.requests.map((r) => r.method)).not.toContain(
+      "workspace/upsertModelProvider",
+    );
+    expect(client.requests.map((r) => r.method)).not.toContain(
+      "workspace/setDefaultModel",
+    );
     expect(result.sessionId).toBe("s-42");
     expect(typeof result.unsubscribe).toBe("function");
   });
 
-  it("passes cwd-derived workspace + provider to upsertModelProvider", async () => {
+  it("passes the cwd-derived workspace to session/create", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -128,46 +116,18 @@ describe("startZcodeProtocolTurn — method sequence", () => {
       cwd: "/proj/foo",
       mode: "agent",
       prompt: "p",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 
-    const upsert = client.requests[0]!;
-    expect(upsert.params).toEqual({
+    const create = client.requests[0]!;
+    expect(create.method).toBe("session/create");
+    expect(create.params).toEqual({
       workspace: { workspacePath: "/proj/foo", workspaceKey: "od-foo" },
-      provider: PROVIDER.providerRecord,
-    });
-  });
-
-  it("passes the same workspace + model to setDefaultModel", async () => {
-    const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
-      "session/create": { session: { sessionId: "s" } },
-      "session/setMode": { ok: true },
-      "session/subscribe": { ok: true },
-      "session/send": { ok: true },
-    });
-
-    await startZcodeProtocolTurn({
-      client,
-      cwd: "/proj/foo",
-      mode: "agent",
-      prompt: "p",
-      providerSelection: PROVIDER,
-      onEvent: () => {},
-    });
-
-    expect(client.requests[1]!.params).toEqual({
-      workspace: { workspacePath: "/proj/foo", workspaceKey: "od-foo" },
-      model: { modelId: "glm-5.1", providerId: "builtin:zai" },
     });
   });
 
   it("session/send carries the prompt and sessionId", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s-7" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -179,19 +139,17 @@ describe("startZcodeProtocolTurn — method sequence", () => {
       cwd: "/p",
       mode: "agent",
       prompt: "do the thing",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 
-    expect(client.requests[5]!.params).toEqual({ sessionId: "s-7", content: "do the thing" });
+    const send = client.requests[client.requests.length - 1]!;
+    expect(send.params).toEqual({ sessionId: "s-7", content: "do the thing" });
   });
 });
 
 describe("startZcodeProtocolTurn — session/resume", () => {
   it("calls session/resume (not create) when resumeSessionId is given", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/resume": { session: { sessionId: "old-1" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -203,7 +161,6 @@ describe("startZcodeProtocolTurn — session/resume", () => {
       cwd: "/p",
       mode: "agent",
       prompt: "more",
-      providerSelection: PROVIDER,
       resumeSessionId: "old-1",
       onEvent: () => {},
     });
@@ -215,8 +172,6 @@ describe("startZcodeProtocolTurn — session/resume", () => {
 
   it("treats a whitespace-only resumeSessionId as absent (creates instead)", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "fresh" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -228,7 +183,6 @@ describe("startZcodeProtocolTurn — session/resume", () => {
       cwd: "/p",
       mode: "agent",
       prompt: "x",
-      providerSelection: PROVIDER,
       resumeSessionId: "   ",
       onEvent: () => {},
     });
@@ -237,11 +191,7 @@ describe("startZcodeProtocolTurn — session/resume", () => {
   });
 
   it("throws ZcodeResumeSessionMissingError when resume target is gone", async () => {
-    const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
-      // The fake client throws a resume-shaped error for session/resume.
-    });
+    const client = makeFakeClient({});
     client.request = async (req) => {
       client.requests.push(req);
       if (req.method === "session/resume") {
@@ -256,7 +206,6 @@ describe("startZcodeProtocolTurn — session/resume", () => {
         cwd: "/p",
         mode: "agent",
         prompt: "x",
-        providerSelection: PROVIDER,
         resumeSessionId: "stale-9",
         onEvent: () => {},
       }),
@@ -270,8 +219,6 @@ describe("startZcodeProtocolTurn — session/resume", () => {
 describe("startZcodeProtocolTurn — setMode optional", () => {
   it("skips session/setMode when no mode is supplied", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s" } },
       "session/subscribe": { ok: true },
       "session/send": { ok: true },
@@ -281,7 +228,6 @@ describe("startZcodeProtocolTurn — setMode optional", () => {
       client,
       cwd: "/p",
       prompt: "x",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 
@@ -290,8 +236,6 @@ describe("startZcodeProtocolTurn — setMode optional", () => {
 
   it("skips session/setMode when mode is whitespace-only", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s" } },
       "session/subscribe": { ok: true },
       "session/send": { ok: true },
@@ -302,7 +246,6 @@ describe("startZcodeProtocolTurn — setMode optional", () => {
       cwd: "/p",
       mode: "   ",
       prompt: "x",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 
@@ -313,8 +256,6 @@ describe("startZcodeProtocolTurn — setMode optional", () => {
 describe("startZcodeProtocolTurn — provider headers & streaming", () => {
   it("auto-responds to requestProviderRuntimeHeaders with { headersApplied: true }", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -325,7 +266,6 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
       cwd: "/p",
       mode: "agent",
       prompt: "x",
-      providerSelection: PROVIDER,
       onEvent: () => {},
     });
 
@@ -342,8 +282,6 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
 
   it("forwards text_delta notifications to onEvent", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -355,7 +293,6 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
       cwd: "/p",
       mode: "agent",
       prompt: "x",
-      providerSelection: PROVIDER,
       onEvent,
     });
 
@@ -370,8 +307,6 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
 
   it("unsubscribe detaches the notification listener (no further delivery)", async () => {
     const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
       "session/create": { session: { sessionId: "s" } },
       "session/setMode": { ok: true },
       "session/subscribe": { ok: true },
@@ -383,7 +318,6 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
       cwd: "/p",
       mode: "agent",
       prompt: "x",
-      providerSelection: PROVIDER,
       onEvent,
     });
 
@@ -399,11 +333,7 @@ describe("startZcodeProtocolTurn — provider headers & streaming", () => {
 describe("startZcodeProtocolTurn — failure cleanup", () => {
   it("unsubscribes and rethrows when a mid-sequence request fails", async () => {
     const unsubscribed = vi.fn();
-    const client = makeFakeClient({
-      "workspace/upsertModelProvider": { ok: true },
-      "workspace/setDefaultModel": { ok: true },
-      // session/create will fail below.
-    });
+    const client = makeFakeClient({});
     client.request = async (req) => {
       client.requests.push(req);
       if (req.method === "session/create") {
@@ -423,7 +353,6 @@ describe("startZcodeProtocolTurn — failure cleanup", () => {
         client,
         cwd: "/p",
         prompt: "x",
-        providerSelection: PROVIDER,
         onEvent: () => {},
       }),
     ).rejects.toThrow(/workspace locked/);

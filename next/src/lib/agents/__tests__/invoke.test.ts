@@ -8,16 +8,9 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 
-const { mockSpawn, existsSyncDelegate, mockReadZcodeConfig } = vi.hoisted(() => ({
+const { mockSpawn, existsSyncDelegate } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   existsSyncDelegate: vi.fn((p: string) => p === "/bin/sh"),
-  // Default: a valid saved provider so the app-server branch proceeds to spawn.
-  // Untyped vi.fn() so tests can also return null ("no provider configured").
-  mockReadZcodeConfig: vi.fn(() => ({
-    provider: "builtin:zai",
-    model: "glm-5.1",
-    models: ["glm-5.1"],
-  })),
 }));
 
 vi.mock("node:child_process", async () => {
@@ -29,10 +22,6 @@ vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return { ...actual, existsSync: existsSyncDelegate };
 });
-
-vi.mock("@html-anything/zcode-protocol/zcode-config", () => ({
-  readZcodeConfig: mockReadZcodeConfig,
-}));
 
 import { invokeAgent, type InvokeEvent } from "../invoke";
 
@@ -70,8 +59,10 @@ async function collectStream(
 
 /**
  * Script the fake app-server child: auto-respond to each JSON-RPC request
- * method on stdin with a canned result on stdout. Returns the child so the
- * caller can emit notifications / close afterwards.
+ * method on stdin with a canned result on stdout. Records every request method
+ * seen on the wire so the relay-absence test (#13) can assert no
+ * provider/workspace relay method is sent. Returns the child so the caller can
+ * emit notifications / close afterwards.
  *
  * Mirrors the cli T5 test seam — see cli/src/__tests__/agents-invoke.test.ts.
  * The next app's app-server branch must behave identically.
@@ -92,13 +83,14 @@ function makeAppServerChild() {
   });
 
   const responses: Record<string, Record<string, unknown>> = {
-    "workspace/upsertModelProvider": { ok: true },
-    "workspace/setDefaultModel": { ok: true },
     "session/create": { session: { sessionId: "sess-1" } },
     "session/setMode": { ok: true },
     "session/subscribe": { ok: true },
     "session/send": { ok: true },
   };
+
+  // Every request method seen on the wire, in order.
+  const sentMethods: string[] = [];
 
   // Tap stdin to auto-respond. The protocol client writes one JSON object
   // per line; we parse and reply on stdout.
@@ -114,6 +106,7 @@ function makeAppServerChild() {
         continue;
       }
       if (typeof frame.method === "string" && typeof frame.id === "string") {
+        sentMethods.push(frame.method);
         const result = responses[frame.method];
         if (result) {
           stdout.write(`${JSON.stringify({ id: frame.id, result })}\n`);
@@ -123,7 +116,7 @@ function makeAppServerChild() {
     return true;
   }) as typeof stdin.write;
 
-  return { child, stdout, stderr, stdin };
+  return { child, stdout, stderr, stdin, sentMethods };
 }
 
 // On win32 next quotes the bin and runs through a shell; on *nix it passes
@@ -146,15 +139,6 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
       p === "/bin/sh",
     );
     mockSpawn.mockReset();
-    (
-      mockReadZcodeConfig as unknown as {
-        mockReturnValue(v: unknown): unknown;
-      }
-    ).mockReturnValue({
-      provider: "builtin:zai",
-      model: "glm-5.1",
-      models: ["glm-5.1"],
-    });
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -404,10 +388,16 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     expect((errors[0] as { message: string }).message).toContain("no session");
   });
 
-  it("errors when no saved model provider is configured", async () => {
-    (
-      mockReadZcodeConfig as unknown as { mockReturnValueOnce(v: unknown): unknown }
-    ).mockReturnValueOnce(null);
+  // ADR-0004 / #13: the app-server child self-authenticates from the user's
+  // logged-in state, so the adapter must NOT relay any provider/key. This
+  // pins the structural absence: the wire sequence contains no
+  // workspace/upsertModelProvider, no workspace/setDefaultModel — the turn is
+  // create→subscribe→send only. Mirrors the cli test seam. If anyone
+  // reintroduces a readZcodeConfig() → upsertModelProvider relay to the
+  // app-server branch, this test fails on the captured stdin wire.
+  it("does not relay any provider/key to the app-server child (self-authenticates)", async () => {
+    const { child, stdout, sentMethods } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
@@ -415,14 +405,33 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
       binOverride: "/resolved/node",
     });
 
-    const events = await collectStream(stream);
-    // No spawn attempted — the branch short-circuits to an error stream.
-    expect(mockSpawn).not.toHaveBeenCalled();
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      type: "error",
-      message: expect.stringContaining("no saved model provider"),
-    });
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    // End the turn so the wire capture is complete.
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+
+    await eventsPromise;
+
+    // The deleted relay methods must NEVER appear on the wire.
+    expect(sentMethods).not.toContain("workspace/upsertModelProvider");
+    expect(sentMethods).not.toContain("workspace/setDefaultModel");
+    // The turn is: session/create → session/subscribe → session/send (no
+    // mode here, so setMode is absent). Assert the exact shape so a
+    // reintroduced provider step shifts the sequence and fails here.
+    expect(sentMethods).toEqual([
+      "session/create",
+      "session/subscribe",
+      "session/send",
+    ]);
   });
 });
 
