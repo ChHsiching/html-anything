@@ -107,6 +107,53 @@ describe("invokeAgent", () => {
     vi.restoreAllMocks();
   });
 
+  // #17: quoteWindowsArg is gated to the app-server (ZCode) branch only. The
+  // shared argv spawn must pass argv verbatim, matching the `main` baseline.
+  // cli's shared branch was already bare (T8 only touched next's), so this
+  // pins that correctness against future regressions. Mirrors next's #17 case.
+  describe("argv branch — no per-element quoting (#17)", () => {
+    it("argv-protocol agent (deepseek-tui) spawns with bare argv elements on win32 — no per-element quoting", async () => {
+      // Force win32 so the shared branch takes the useShell path. Restore in
+      // finally so a mid-assertion throw can't poison sibling tests.
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+      try {
+        const { child, stdout } = makeFakeChild();
+        mockSpawn.mockReturnValue(child);
+        existsSyncDelegate.mockImplementation((p: string) => p === BIN_OVERRIDE);
+
+        const stream = invokeAgent({
+          agent: "deepseek-tui",
+          prompt: "make a page",
+          binOverride: BIN_OVERRIDE,
+        });
+
+        await new Promise((r) => setTimeout(r, 0));
+        const eventsPromise = collectStream(stream);
+        stdout.end();
+        await new Promise((r) => setImmediate(r));
+        child.emit("close", 0);
+        await eventsPromise;
+
+        // spawn called once; argv (2nd arg) is bare — no element wrapped in
+        // quotes (the `main` baseline).
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        const call = mockSpawn.mock.calls[0];
+        const spawnedArgv = call[1] as string[];
+        for (const el of spawnedArgv) {
+          expect(el.startsWith('"')).toBe(false);
+          expect(el.endsWith('"')).toBe(false);
+        }
+        expect(spawnedArgv).toEqual(
+          expect.arrayContaining(["exec", "--auto", "make a page"]),
+        );
+        expect(call[2]).toMatchObject({ shell: true });
+      } finally {
+        Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+      }
+    });
+  });
+
   describe("error cases", () => {
     it("returns error stream for unknown agent", async () => {
       const stream = invokeAgent({

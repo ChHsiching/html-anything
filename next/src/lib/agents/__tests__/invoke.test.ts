@@ -542,6 +542,53 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
 // Regression guards for the argv branch — keep parity with the pre-T6 behavior
 // so the new app-server routing doesn't disturb existing adapters.
 describe("invokeAgent — argv branch (regression)", () => {
+  // #17: quoteWindowsArg is gated to the app-server (ZCode) branch only. The
+  // shared argv spawn (every argv / argv-message agent — deepseek-tui,
+  // openclaw) must pass argv verbatim, matching the `main` baseline. This pins
+  // that guarantee on a win32-mocked host: no argv element gains quotes.
+  it("argv-protocol agent (deepseek-tui) spawns with bare argv elements on win32 — no per-element quoting (#17)", async () => {
+    // Force win32 so the shared branch takes the useShell path. Restore in
+    // finally so a mid-assertion throw can't poison sibling tests.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      const { child, stdout } = makeFakeChild();
+      mockSpawn.mockReturnValue(child);
+      existsSyncDelegate.mockImplementation((p: string) => p === BIN_OVERRIDE);
+
+      const stream = invokeAgent({
+        agent: "deepseek-tui",
+        prompt: "make a page",
+        binOverride: BIN_OVERRIDE,
+      });
+
+      await new Promise((r) => setTimeout(r, 0));
+      const eventsPromise = collectStream(stream);
+      stdout.end();
+      await new Promise((r) => setImmediate(r));
+      child.emit("close", 0);
+      await eventsPromise;
+
+      // spawn called once; argv (2nd arg) is bare — no element wrapped in
+      // quotes. The bin is still quoted on win32 (for .cmd/.bat shims) and
+      // shell:true is still set, but that's the unchanged bin-quoting path.
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      const call = mockSpawn.mock.calls[0];
+      const spawnedArgv = call[1] as string[];
+      for (const el of spawnedArgv) {
+        expect(el.startsWith('"')).toBe(false);
+        expect(el.endsWith('"')).toBe(false);
+      }
+      // Shape is the documented deepseek-tui argv + the prompt positional.
+      expect(spawnedArgv).toEqual(
+        expect.arrayContaining(["exec", "--auto", "make a page"]),
+      );
+      expect(call[2]).toMatchObject({ shell: true });
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+    }
+  });
+
   it("unknown agent returns a single error event", async () => {
     const stream = invokeAgent({
       agent: "nonexistent",

@@ -225,13 +225,16 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         // EINVAL / "spawn 无效的参数". macOS/Linux use direct exec.
         // Safety: prompt content is delivered via stdin or `--message
         // <text>` (argv-message), not interpolated into a shell command,
-        // so this does not introduce a shell-injection vector. Each argv
-        // element is quoted too, so paths with spaces (e.g. ZCode's
-        // `C:\Program Files\ZCode\...\zcode.cjs`) survive the shell round-trip.
+        // so this does not introduce a shell-injection vector.
+        //
+        // Only the BIN is quoted (for the shim); argv elements are passed
+        // VERBATIM — the `main` baseline. Per-element quoting
+        // (quoteWindowsArg) lives in the app-server (ZCode) branch below,
+        // where spaced Windows paths (`C:\Program Files\ZCode\…`) need it.
         const useShell = process.platform === "win32";
         child = spawn(
           useShell ? `"${bin}"` : bin!,
-          useShell ? fullArgv.map(quoteWindowsArg) : fullArgv,
+          fullArgv,
           {
             cwd: opts.cwd ?? process.cwd(),
             env,
