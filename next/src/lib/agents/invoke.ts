@@ -564,6 +564,18 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
         teardown();
       };
 
+      // #21 / spec #20 N1: the protocol stream maps tool_call→{type:"tool_use",
+      // id, name} and result→{type:"tool_result", toolUseId} — neither carries
+      // user-visible text, so without this bridge the SSE stream emits zero
+      // bytes during the model's tool window (e.g. a multi-second WebSearch),
+      // freezing the UI. Forward both as {type:"meta", key:"status"} so the
+      // bytes keep flowing (byte-level keepalive) and a future frontend can
+      // surface progress without further adapter work. `meta` is already in
+      // the InvokeEvent union (openclaw emits it for model/session/result), so
+      // this adds no new event type. tool_result only carries toolUseId, so
+      // the human-readable name is carried here from the preceding tool_use.
+      const toolNamesById = new Map<string, string>();
+
       const onEvent = (event: Record<string, unknown>) => {
         if (closed || turnEnded) return;
         const type = typeof event.type === "string" ? event.type : "";
@@ -576,10 +588,30 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           // A file-write tool call may carry the generated HTML; reuse the
           // same rescue logic the other adapters apply to Claude-style
           // tool_use blocks.
+          const id = typeof event.id === "string" ? event.id : "";
           const name = typeof event.name === "string" ? event.name : "";
           const input = (event.input ?? null) as unknown;
+          if (id && name) toolNamesById.set(id, name);
           const html = rescueHtmlFromToolUse([{ type: "tool_use", name, input }]);
-          if (html) safeEnqueue({ type: "html", text: html });
+          if (html) {
+            safeEnqueue({ type: "html", text: html });
+          } else if (name) {
+            // Non-HTML tool_use (e.g. WebSearch) → forward as a meta status so
+            // the stream keeps flowing during the tool window (#21).
+            safeEnqueue({ type: "meta", key: "status", value: `🔍 ${name}` });
+          }
+          return;
+        }
+        if (type === "tool_result") {
+          // tool_result carries only toolUseId (no name); recover the name from
+          // the preceding tool_use, falling back to a bare ✓ when untracked.
+          const toolUseId = typeof event.toolUseId === "string" ? event.toolUseId : "";
+          const name = (toolUseId && toolNamesById.get(toolUseId)) ?? "";
+          safeEnqueue({
+            type: "meta",
+            key: "status",
+            value: name ? `✓ ${name}` : "✓",
+          });
           return;
         }
         if (type === "usage") {
@@ -614,8 +646,12 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           finish(1);
           return;
         }
-        // thinking_*, conversation_title, tool_result, etc. are not part of the
-        // InvokeEvent surface today; intentionally dropped.
+        // thinking_*, conversation_title, etc. are not part of the InvokeEvent
+        // surface today; intentionally dropped (tool_use/tool_result are handled
+        // above). thinking_* would flood the stream; the spec #20 grilling
+        // rejected forwarding them. (N2 will reset a silence timer on every
+        // onEvent call — including thinking_delta — but that is a separate
+        // ticket.)
       };
 
       // The child dying before the turn resolves is an error (the protocol

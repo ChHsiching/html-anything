@@ -360,6 +360,185 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     expect((htmls[0] as { text: string }).text).toBe(html);
   });
 
+  // #21 / spec #20 N1: a non-HTML tool_use (e.g. WebSearch) is forwarded as a
+  // {type:"meta", key:"status"} event so the SSE stream emits bytes during the
+  // model's tool window instead of freezing the UI. The HTML-rescue branch
+  // (above) is unchanged — only the previously-dropped fallthrough now emits a
+  // meta. The meta key is adapter-internal naming; the frontend ignores meta
+  // today, so this is a no-op for the UI until a future spec surfaces it.
+  it("forwards a non-HTML tool_use as a meta status event (#21)", async () => {
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "search the web",
+      binOverride: "/resolved/node",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    // A tool_call whose name is not a write tool → no HTML rescue → meta.
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: {
+          payload: {
+            kind: "tool_call",
+            toolCallId: "ws1",
+            toolName: "WebSearch",
+            input: { query: "Matt Pocock Skills" },
+          },
+        },
+      })}\n`,
+    );
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+
+    const events = await eventsPromise;
+    const statusMetas = events.filter(
+      (e) => e.type === "meta" && (e as { key?: string }).key === "status",
+    );
+    expect(statusMetas).toHaveLength(1);
+    expect(statusMetas[0]).toMatchObject({
+      type: "meta",
+      key: "status",
+      value: "🔍 WebSearch",
+    });
+    // A non-HTML tool_use must NOT also emit an html event.
+    expect(events.some((e) => e.type === "html")).toBe(false);
+  });
+
+  // #21: tool_result carries only toolUseId (no name); the adapter recovers the
+  // name from the preceding tool_use and emits "✓ <name>". When the result's
+  // toolUseId was never seen, it falls back to a bare "✓".
+  it("forwards a tool_result as a meta status event with the carried tool name (#21)", async () => {
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "search the web",
+      binOverride: "/resolved/node",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    // tool_use first (registers the name under its id), then the matching
+    // result, then an orphan result with an untracked id, then end the turn.
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: {
+          payload: {
+            kind: "tool_call",
+            toolCallId: "ws1",
+            toolName: "WebSearch",
+            input: { query: "x" },
+          },
+        },
+      })}\n`,
+    );
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: {
+          payload: {
+            kind: "result",
+            toolCallId: "ws1",
+            result: { content: [{ type: "text", text: "hits" }], success: true },
+          },
+        },
+      })}\n`,
+    );
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: {
+          payload: {
+            kind: "result",
+            toolCallId: "orphan",
+            result: { content: [], success: true },
+          },
+        },
+      })}\n`,
+    );
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+
+    const events = await eventsPromise;
+    const statusMetas = events
+      .filter((e) => e.type === "meta" && (e as { key?: string }).key === "status")
+      .map((e) => (e as { value?: unknown }).value);
+    // tool_use meta (🔍) + matched result meta (✓ name) + orphan result meta (✓).
+    expect(statusMetas).toEqual(["🔍 WebSearch", "✓ WebSearch", "✓"]);
+  });
+
+  // #21: thinking_delta is the model's high-frequency reasoning signal. The
+  // spec #20 grilling rejected forwarding it (would flood the stream), so it
+  // must produce NO meta status event. (N2, a separate ticket, will reset a
+  // silence timer on it — but N1 deliberately drops it.)
+  it("does not emit a meta for thinking_delta (still dropped, #21)", async () => {
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "think hard",
+      binOverride: "/resolved/node",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { kind: "thinking_delta", delta: "reasoning..." } },
+      })}\n`,
+    );
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { kind: "thinking_delta", delta: "more..." } },
+      })}\n`,
+    );
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+
+    const events = await eventsPromise;
+    const statusMetas = events.filter(
+      (e) => e.type === "meta" && (e as { key?: string }).key === "status",
+    );
+    expect(statusMetas).toHaveLength(0);
+    // The only meta on the stream should be the terminal usage one.
+    const metas = events.filter((e) => e.type === "meta");
+    expect(metas.map((m) => (m as { key?: string }).key)).toEqual(["usage"]);
+  });
+
   it("final-result usage → {type:'done', code:0}", async () => {
     const { child, stdout } = makeAppServerChild();
     mockSpawn.mockReturnValue(child);
