@@ -32,6 +32,7 @@ const PROTOCOL_KEY: Record<AgentInfo["protocol"], { key: DictKey; tone: "ok" | "
   "argv-message": { key: "protocol.argvMessage", tone: "ok" },
   acp: { key: "protocol.acp", tone: "warn" },
   "pi-rpc": { key: "protocol.piRpc", tone: "warn" },
+  "app-server": { key: "protocol.appServer", tone: "ok" },
 };
 
 const VENDOR_GRADIENT: Record<string, string> = {
