@@ -57,6 +57,23 @@ const CONFIG = {
         "GLM-5.2": { limit: { context: 1048576, output: 16384 } },
       },
     },
+    // Mirrors the live `builtin:bigmodel` entry: enabled, no
+    // systemDisabledReason, but apiKey is EMPTY. The GUI prompts for a key when
+    // the user selects this provider; a headless adapter cannot, so its models
+    // must NOT surface in the picker. The filter matches ensureWorkspaceModel's
+    // relay reader (zcode-config.ts: enabled + apiKey non-empty + kind).
+    "builtin:bigmodel": {
+      name: "Bigmodel",
+      kind: "anthropic",
+      options: { apiKey: "", baseURL: "https://open.bigmodel.cn/api/paas/v4" },
+      enabled: true,
+      source: "builtin",
+      models: {
+        "GLM-5.2": { limit: { context: 131072, output: 4096 } },
+        "GLM-5-Turbo": { limit: { context: 131072, output: 4096 } },
+        "glm-5v-turbo": { limit: { context: 131072, output: 4096 } },
+      },
+    },
   },
 };
 
@@ -64,12 +81,15 @@ describe("parseZcodePickerModels", () => {
   it("lists every enabled provider's models, excluding disabled + systemDisabled providers", () => {
     const models = parseZcodePickerModels(CONFIG);
 
-    // Two enabled providers with no systemDisabledReason contribute:
+    // Two enabled providers with a non-empty apiKey contribute:
     //   bigmodel-coding-plan → GLM-5.2, GLM-5-Turbo
     //   openrouter           → anthropic/claude-sonnet-4.5
     // Excluded:
     //   bigmodel-start-plan  → enabled:false (+ systemDisabledReason)
     //   zai                  → enabled:true but systemDisabledReason set
+    //   bigmodel             → enabled:true, no disabledReason, but apiKey:""
+    //                          (matches the live `builtin:bigmodel` placeholder;
+    //                          headless adapter can't use it → must be hidden)
     expect(models).toEqual([
       { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
       { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
@@ -79,6 +99,35 @@ describe("parseZcodePickerModels", () => {
         providerId: "builtin:openrouter",
       },
     ]);
+  });
+
+  it("excludes an enabled provider with no systemDisabledReason but an EMPTY apiKey", () => {
+    // Mirrors the live `builtin:bigmodel` entry (enabled, no disabledReason,
+    // apiKey:""). The filter must match ensureWorkspaceModel's relay reader
+    // (zcode-config.ts): enabled + apiKey non-empty + kind. Otherwise the
+    // picker lists models the user cannot actually run, and (when the same
+    // modelId also exists on a usable provider) creates duplicate picker ids
+    // that break ModelPicker's key/active uniqueness contract.
+    const models = parseZcodePickerModels({
+      provider: {
+        "builtin:bigmodel": {
+          kind: "anthropic",
+          options: { apiKey: "" },
+          enabled: true,
+          models: { "GLM-5.2": {}, "glm-5v-turbo": {} },
+        },
+        "builtin:bigmodel-coding-plan": {
+          kind: "anthropic",
+          options: { apiKey: "real-key" },
+          enabled: true,
+          models: { "GLM-5.2": {}, "GLM-5-Turbo": {} },
+        },
+      },
+    });
+    // Only the coding-plan provider's models surface; the empty-key provider's
+    // glm-5v-turbo does NOT (and GLM-5.2 appears once, not twice).
+    expect(models.map((m) => m.id)).toEqual(["GLM-5.2", "GLM-5-Turbo"]);
+    expect(models.every((m) => m.providerId === "builtin:bigmodel-coding-plan")).toBe(true);
   });
 
   it("each entry carries its providerId (so invoke can recover {providerId, modelId})", () => {
@@ -106,10 +155,14 @@ describe("parseZcodePickerModels", () => {
     const models = parseZcodePickerModels({
       provider: {
         "builtin:ok": {
+          kind: "anthropic",
+          options: { apiKey: "key" },
           enabled: true,
           models: { "good-model": {} },
         },
         "builtin:lapsed": {
+          kind: "anthropic",
+          options: { apiKey: "key" },
           enabled: true,
           systemDisabledReason: "oauth_provider_inactive",
           models: { "lapsed-model": {} },
@@ -122,8 +175,8 @@ describe("parseZcodePickerModels", () => {
   it("preserves insertion order (GUI display order) within and across providers", () => {
     const models = parseZcodePickerModels({
       provider: {
-        "p-a": { enabled: true, models: { "a-2": {}, "a-1": {} } },
-        "p-b": { enabled: true, models: { "b-1": {} } },
+        "p-a": { kind: "anthropic", options: { apiKey: "k" }, enabled: true, models: { "a-2": {}, "a-1": {} } },
+        "p-b": { kind: "anthropic", options: { apiKey: "k" }, enabled: true, models: { "b-1": {} } },
       },
     });
     expect(models.map((m) => m.id)).toEqual(["a-2", "a-1", "b-1"]);
@@ -186,7 +239,7 @@ describe("resolveZcodeDefaultSelection", () => {
     // A value with no colon is matched whole against the config keys.
     expect(
       resolveZcodeDefaultSelection({ custom: "custom-no-prefix" }, {
-        provider: { "custom-no-prefix": { enabled: true, models: { "m-1": {} } } },
+        provider: { "custom-no-prefix": { kind: "anthropic", options: { apiKey: "k" }, enabled: true, models: { "m-1": {} } } },
       }),
     ).toEqual({ providerId: "custom-no-prefix", modelId: "m-1" });
   });

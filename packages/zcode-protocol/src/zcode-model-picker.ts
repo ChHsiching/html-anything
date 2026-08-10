@@ -76,7 +76,42 @@ export interface ZcodePickerOptions {
 interface RawProviderEntry {
   enabled?: unknown;
   systemDisabledReason?: unknown;
+  kind?: unknown;
+  options?: unknown;
   models?: unknown;
+}
+
+/** The `options` object inside a provider entry. */
+interface RawProviderOptions {
+  apiKey?: unknown;
+}
+
+/**
+ * Narrow the raw `kind` to one of the three wire kinds. Mirrors the relay
+ * reader's `coerceKind` (zcode-config.ts) so both readers agree on what counts
+ * as a usable provider — drift here would mean the picker offers a provider the
+ * relay refuses to provision (or vice versa).
+ */
+function isKnownKind(kind: unknown): boolean {
+  return kind === "anthropic" || kind === "openai" || kind === "openai-compatible";
+}
+
+/**
+ * Is this raw provider entry usable — i.e. would the workspace-default relay
+ * actually provision it? Mirrors {@link parseProviderEntry} in zcode-config.ts:
+ * enabled, no systemDisabledReason, recognized kind, non-empty apiKey. Both the
+ * picker list and the default-selection highlight must agree on this, or the
+ * picker would offer / highlight a provider the relay refuses to run.
+ */
+function isUsableProvider(raw: RawProviderEntry): boolean {
+  if (raw.enabled !== true) return false;
+  if (typeof raw.systemDisabledReason === "string" && raw.systemDisabledReason.length > 0) {
+    return false;
+  }
+  if (!isKnownKind(raw.kind)) return false;
+  const options = isRecord(raw.options) ? (raw.options as RawProviderOptions) : null;
+  const apiKey = options && typeof options.apiKey === "string" ? options.apiKey : "";
+  return apiKey.length > 0;
 }
 
 /** `~/.zcode/v2/setting.json`'s `modelProviderFamilySelectedKeys` (fields we read). */
@@ -98,7 +133,20 @@ export function defaultZcodeSettingPath(): string {
 
 /**
  * Parse an already-decoded `config.json` `provider` map into picker entries,
- * filtered to `enabled` providers with no `systemDisabledReason`.
+ * filtered to providers that are actually usable.
+ *
+ * A provider is usable when it is `enabled`, has no `systemDisabledReason`,
+ * has a recognized `kind`, AND has a non-empty `options.apiKey`. This is the
+ * SAME filter the workspace-default relay reader applies
+ * (zcode-config.ts `parseProviderEntry`) — the picker must not offer a
+ * provider the relay refuses to provision. The `apiKey` non-empty check is
+ * load-bearing: the live GUI keeps first-party placeholders like
+ * `builtin:bigmodel` with `enabled:true` but `apiKey:""` (the GUI prompts for
+ * a key when the user selects it); a headless adapter cannot prompt, so those
+ * models would be offered-but-broken. Dropping them here also keeps model ids
+ * unique across the picker (the same modelId often exists under both the
+ * placeholder and the usable Coding Plan provider), preserving ModelPicker's
+ * `key={id}` / `active = id === modelId` uniqueness contract.
  *
  * Exported for direct unit testing. Iterates providers in insertion order
  * (config.json's object key order = the GUI's display order); within a
@@ -114,13 +162,12 @@ export function parseZcodePickerModels(data: unknown): ZcodePickerModel[] {
   for (const [providerId, entry] of Object.entries(providers)) {
     if (!providerId || !isRecord(entry)) continue;
     const raw = entry as RawProviderEntry;
-    // Only enabled providers with no system-disabled reason expose their
-    // models — the GUI sets systemDisabledReason on expired/inactive
-    // entitlements, so this hides models the user cannot reach.
-    if (raw.enabled !== true) continue;
-    if (typeof raw.systemDisabledReason === "string" && raw.systemDisabledReason.length > 0) {
-      continue;
-    }
+    // Only usable providers (enabled, no disabledReason, recognized kind,
+    // non-empty apiKey) expose their models — see isUsableProvider for why
+    // the apiKey check is load-bearing (placeholder providers would otherwise
+    // offer models the headless adapter cannot run, and duplicate ids that
+    // break ModelPicker's key/active uniqueness contract).
+    if (!isUsableProvider(raw)) continue;
     const modelsMap = isRecord(raw.models) ? raw.models : null;
     if (!modelsMap) continue;
     for (const modelId of Object.keys(modelsMap)) {
@@ -174,12 +221,10 @@ export function resolveZcodeDefaultSelection(
     const entry = providers[providerId];
     if (!isRecord(entry)) continue;
     const raw = entry as unknown as RawProviderEntry;
-    // The selected provider must itself be usable (enabled, not disabled) for
-    // its default model to be a sensible picker highlight.
-    if (raw.enabled !== true) continue;
-    if (typeof raw.systemDisabledReason === "string" && raw.systemDisabledReason.length > 0) {
-      continue;
-    }
+    // The selected provider must itself be usable (same filter as the picker
+    // list) for its default model to be a sensible highlight — otherwise we'd
+    // highlight a placeholder provider the relay cannot provision.
+    if (!isUsableProvider(raw)) continue;
     const modelsMap = isRecord(raw.models) ? raw.models : null;
     if (!modelsMap) continue;
     const firstModelId = Object.keys(modelsMap)[0];
