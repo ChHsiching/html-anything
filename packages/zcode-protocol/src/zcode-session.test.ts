@@ -246,6 +246,90 @@ describe("startZcodeProtocolTurn — method sequence", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// startZcodeProtocolTurn — per-turn model override (#19 / ADR-0005 decision 4).
+// A live probe (probe-create-model.cjs, out of PR) proved session/create
+// ACCEPTS model:{providerId, modelId} and binds it to the session
+// (contextWindow changed 1M→200K on GLM-5.2→GLM-5-Turbo), while session/send
+// REJECTS model fields (strict Zod) — model choice is a create-time concern.
+// So the turn driver threads an optional model into session/create ONLY.
+// ---------------------------------------------------------------------------
+describe("startZcodeProtocolTurn — per-turn model override", () => {
+  it("carries model:{providerId, modelId} on session/create when a model is supplied", async () => {
+    const client = makeFakeClient({
+      "session/create": { session: { sessionId: "s-model" } },
+      "session/setMode": { ok: true },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    });
+
+    await startZcodeProtocolTurn({
+      client,
+      cwd: "/proj/foo",
+      prompt: "p",
+      model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5-Turbo" },
+      onEvent: () => {},
+    });
+
+    const create = client.requests[0]!;
+    expect(create.method).toBe("session/create");
+    // model is added to the create params alongside workspace — live-confirmed
+    // the server accepts the nested object and binds it for the whole session.
+    expect(create.params).toEqual({
+      workspace: { workspacePath: "/proj/foo", workspaceKey: "/proj/foo" },
+      model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5-Turbo" },
+    });
+  });
+
+  it("omits model from session/create when no model is supplied (workspace default wins)", async () => {
+    const client = makeFakeClient({
+      "session/create": { session: { sessionId: "s-default" } },
+      "session/setMode": { ok: true },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    });
+
+    await startZcodeProtocolTurn({
+      client,
+      cwd: "/proj/foo",
+      prompt: "p",
+      onEvent: () => {},
+    });
+
+    const create = client.requests[0]!;
+    expect(create.method).toBe("session/create");
+    // No model field → the workspace default (provisioned by the once-per-boot
+    // relay) applies. This is the unchanged, pre-#19 behaviour.
+    expect(create.params).toEqual({
+      workspace: { workspacePath: "/proj/foo", workspaceKey: "/proj/foo" },
+    });
+    expect(create.params).not.toHaveProperty("model");
+  });
+
+  it("does NOT carry model on session/send even when supplied at create time", async () => {
+    const client = makeFakeClient({
+      "session/create": { session: { sessionId: "s-x" } },
+      "session/setMode": { ok: true },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    });
+
+    await startZcodeProtocolTurn({
+      client,
+      cwd: "/p",
+      prompt: "reply",
+      model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5-Turbo" },
+      onEvent: () => {},
+    });
+
+    const send = client.requests[client.requests.length - 1]!;
+    expect(send.method).toBe("session/send");
+    // session/send REJECTS model (live-proven strict Zod) — model must never
+    // leak onto the send frame.
+    expect(send.params).toEqual({ sessionId: "s-x", content: "reply" });
+  });
+});
+
 describe("startZcodeProtocolTurn — session/resume", () => {
   it("calls session/resume with { sessionId } only (workspace ignored by the server)", async () => {
     const client = makeFakeClient({

@@ -4,7 +4,8 @@ import path from "node:path";
 import { resolveOnPath, resolveOpenclawAgentId, resolveZcodeBin, resolveZcodeNodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef } from "./detect";
 import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError, rescueHtmlFromToolUse } from "./argv";
 import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
-import { ensureWorkspaceModel, startZcodeProtocolTurn } from "@html-anything/zcode-protocol/zcode-session";
+import { ensureWorkspaceModel, startZcodeProtocolTurn, type ZcodeTurnModel } from "@html-anything/zcode-protocol/zcode-session";
+import { readZcodeModelPicker } from "@html-anything/zcode-protocol/zcode-model-picker";
 
 export type InvokeOpts = {
   agent: string;
@@ -405,6 +406,40 @@ type AppServerInvokeArgs = {
   opts: InvokeOpts;
 };
 
+/**
+ * Resolve the user's per-agent ZCode model pick into the `{providerId, modelId}`
+ * pair `session/create` binds to the session (#19 / ADR-0005 decision 4).
+ *
+ * The UI stores only the model id string per agent (`agentModels[id]`), so the
+ * `providerId` must be recovered. The picker models (built at detect time from
+ * `~/.zcode/v2/config.json`) each carry their `providerId`; we read the same
+ * resolved config here and find the entry whose id matches the pick. When the
+ * same model id exists under multiple enabled providers (e.g. GLM-5.2 is on
+ * both `builtin:bigmodel` and `builtin:bigmodel-coding-plan`), prefer the entry
+ * whose provider is the GUI's selected one — `readZcodeModelPicker` derives
+ * `defaultProviderId` from `setting.json`'s `modelProviderFamilySelectedKeys`.
+ *
+ * Returns `undefined` when the pick is absent, `"default"`, or not found in the
+ * dynamic list — in all those cases `session/create` carries no `model` field
+ * and the workspace default (provisioned by `ensureWorkspaceModel`) applies,
+ * which is the unchanged pre-#19 path.
+ */
+function resolveZcodeTurnModel(modelPick: string | undefined): ZcodeTurnModel | undefined {
+  const trimmed = modelPick?.trim();
+  if (!trimmed || trimmed === "default") return undefined;
+  const { models, defaultProviderId } = readZcodeModelPicker();
+  const matches = models.filter((m) => m.id === trimmed);
+  if (matches.length === 0) return undefined;
+  // Prefer the GUI's selected provider when the picked model id is ambiguous
+  // across providers; otherwise take the first match (insertion order = the
+  // GUI's display order).
+  const chosen =
+    defaultProviderId !== null
+      ? matches.find((m) => m.providerId === defaultProviderId) ?? matches[0]!
+      : matches[0]!;
+  return { providerId: chosen.providerId, modelId: chosen.id };
+}
+
 function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): ReadableStream<InvokeEvent> {
   // ADR-0004 + #14 (live-probe-corrected): the app-server child self-authentic
   // ates the LOGIN from the user's logged-in state (a bare session/list returns
@@ -610,12 +645,19 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           cwd: opts.cwd ?? process.cwd(),
           signal: opts.signal,
         });
+        // #19 / ADR-0005 decision 4: resolve the user's per-agent model pick
+        // into {providerId, modelId}. When set (non-default), session/create
+        // carries it and binds it to the session (live-proven). When unset
+        // (default/absent/not-found), session/create carries no model field and
+        // the workspace default (provisioned by the relay above) applies.
+        const model = resolveZcodeTurnModel(opts.model);
         const turn = await startZcodeProtocolTurn({
           client,
           cwd: opts.cwd ?? process.cwd(),
           prompt: opts.prompt,
           onEvent,
           signal: opts.signal,
+          ...(model ? { model } : {}),
         });
         turnUnsubscribe = turn.unsubscribe;
       } catch (err) {

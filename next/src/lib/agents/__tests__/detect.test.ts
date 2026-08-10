@@ -9,14 +9,31 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const { existsSyncMock } = vi.hoisted(() => ({
+const { existsSyncMock, pickerModels, pickerDefault } = vi.hoisted(() => ({
   existsSyncMock: vi.fn((_path?: string) => false),
+  // #19: the dynamic ZCode picker models returned by readZcodeModelPicker.
+  // Mirrors a live config with TWO enabled providers (one with 2 models, one
+  // with 1) + disabled providers filtered out upstream by the reader.
+  pickerModels: [
+    { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
+    { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
+    { id: "anthropic/claude-sonnet-4.5", label: "anthropic/claude-sonnet-4.5", providerId: "builtin:openrouter" },
+  ],
+  pickerDefault: "GLM-5.2" as string | null,
 }));
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return { ...actual, existsSync: existsSyncMock };
 });
+
+// #19 / ADR-0005 decision 4: detect reads the ZCode picker models from
+// ~/.zcode/v2/config.json via the protocol package's reader. Mock it so the
+// detect-layer tests don't touch disk; the reader itself (incl. the disabled
+// provider filtering) is tested in the protocol package.
+vi.mock("@html-anything/zcode-protocol/zcode-model-picker", () => ({
+  readZcodeModelPicker: () => ({ models: pickerModels, defaultProviderId: "builtin:bigmodel-coding-plan", defaultModelId: pickerDefault }),
+}));
 
 import {
   AGENTS,
@@ -188,13 +205,16 @@ describe("ZCode agent registration (T7)", () => {
     expect(zcode.resolvedBin).toBe("C:\\Program Files\\ZCode\\ZCode.exe");
   });
 
-  // ADR-0004 / #13 Q1: fallbackModels for the ZCode picker come from the
-  // AgentDef.fallbackModels static floor ([DEFAULT_MODEL]), NOT from a read
-  // of ~/.zcode/v2/model-providers.json. The child self-authenticates and
-  // resolves its own model, so the picker only needs "Default (CLI config)".
-  // zcodeModels() is deleted; the app-server branch uses a.fallbackModels
-  // verbatim, like every other agent.
-  it("picker models are the static [DEFAULT_MODEL] floor (no config read)", () => {
+  // #19 / ADR-0005 decision 4: the ZCode picker is populated DYNAMICALLY from
+  // ~/.zcode/v2/config.json (the GUI's resolved config), NOT the static
+  // [DEFAULT_MODEL] floor. Every `enabled` provider with no
+  // systemDisabledReason contributes its models; DEFAULT_MODEL is prepended
+  // (= no `model` field → workspace default). The mocked reader returns the
+  // filtered set for a config with TWO enabled providers (one 2-model, one
+  // 1-model) + disabled providers already excluded — so the picker must show
+  // DEFAULT_MODEL + the 3 enabled models, with each non-default entry
+  // carrying its providerId for the invoke-layer model resolution.
+  it("picker models are dynamic from config.json: DEFAULT_MODEL + enabled providers' models", () => {
     vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
     stubPlatform("linux");
     existsSyncMock.mockImplementation((p) => p === "/opt/zcode/zcode.cjs");
@@ -203,6 +223,30 @@ describe("ZCode agent registration (T7)", () => {
     const zcode = findAgent(agents, "zcode");
 
     expect(zcode.available).toBe(true);
+    expect(zcode.models).toEqual([
+      DEFAULT_MODEL,
+      { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
+      { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
+      {
+        id: "anthropic/claude-sonnet-4.5",
+        label: "anthropic/claude-sonnet-4.5",
+        providerId: "builtin:openrouter",
+      },
+    ]);
+  });
+
+  // When ZCode is NOT available (no install found), the picker still surfaces
+  // the static [DEFAULT_MODEL] floor — the config read is gated on the same
+  // availability as the rest of ZCode's detection, so an unavailable install
+  // doesn't crash the picker with a spurious config read.
+  it("picker falls back to [DEFAULT_MODEL] when ZCode is unavailable (config read gated)", () => {
+    stubPlatform("darwin");
+    existsSyncMock.mockReturnValue(false);
+
+    const agents = detectAgents();
+    const zcode = findAgent(agents, "zcode");
+
+    expect(zcode.available).toBe(false);
     expect(zcode.models).toEqual([DEFAULT_MODEL]);
   });
 

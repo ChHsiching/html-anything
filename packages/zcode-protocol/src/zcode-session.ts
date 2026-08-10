@@ -68,6 +68,22 @@ export interface ZcodeProtocolClientLike {
   respond(id: string, result: JsonRecord): void;
 }
 
+/**
+ * A create-time model selection handed to `session/create`. Live-proven
+ * (#19 / ADR-0005 decision 4, probe-create-model.cjs): `session/create`
+ * accepts this nested object and binds it to the session for every turn of
+ * that session (contextWindow changed 1M→200K when switching
+ * GLM-5.2→GLM-5-Turbo). `session/send` REJECTS model fields (strict Zod), so
+ * model choice is a create-time concern — this object only ever travels on the
+ * `session/create` frame, never `session/send`.
+ */
+export interface ZcodeTurnModel {
+  /** Provider id, e.g. `builtin:bigmodel-coding-plan` (the config.json key). */
+  providerId: string;
+  /** Model id under that provider's `models`, e.g. `GLM-5-Turbo`. */
+  modelId: string;
+}
+
 /** Options for {@link startZcodeProtocolTurn}. */
 export interface StartZcodeProtocolTurnOptions {
   client: ZcodeProtocolClientLike;
@@ -80,6 +96,15 @@ export interface StartZcodeProtocolTurnOptions {
   deliveryKind?: string;
   /** Optional session mode sent via `session/setMode`. Omit to skip that call. */
   mode?: string | null;
+  /**
+   * Per-turn model selection. When set, `session/create` carries
+   * `model:{providerId, modelId}` (live-proven accepted + bound to the
+   * session). When unset, `session/create` carries no `model` field and the
+   * workspace default (provisioned by {@link ensureWorkspaceModel}) applies.
+   * `model` never travels on `session/send` (rejected by the server's strict
+   * Zod). See {@link ZcodeTurnModel}.
+   */
+  model?: ZcodeTurnModel;
   /** Sink for mapped stream events (text_delta, status, usage, …). */
   onEvent: (event: ZcodeEvent) => void;
   /** The user's prompt, sent via `session/send`. */
@@ -283,6 +308,7 @@ export async function startZcodeProtocolTurn({
   cwd,
   deliveryKind = DEFAULT_DELIVERY_KIND,
   mode,
+  model,
   onEvent,
   prompt,
   requestTimeoutMs,
@@ -340,7 +366,18 @@ export async function startZcodeProtocolTurn({
         throw error;
       }
     } else {
-      sessionId = sessionIdFromCreateResponse(await request("session/create", { workspace }));
+      // #19 / ADR-0005 decision 4: when the caller supplies a per-turn model,
+      // carry it on session/create. Live-proven (probe-create-model.cjs): the
+      // server accepts model:{providerId, modelId} and binds it to the session
+      // (contextWindow changed 1M→200K on GLM-5.2→GLM-5-Turbo). When no model
+      // is supplied, omit the field — the workspace default (provisioned by
+      // ensureWorkspaceModel) applies, which is the unchanged pre-#19 path.
+      sessionId = sessionIdFromCreateResponse(
+        await request(
+          "session/create",
+          model ? { workspace, model } : { workspace },
+        ),
+      );
     }
 
     if (mode?.trim()) {

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join, posix, win32 } from "node:path";
+import { readZcodeModelPicker } from "@html-anything/zcode-protocol/zcode-model-picker";
 
 /**
  * Agent detection — adapted from next/src/lib/agents/detect.ts
@@ -22,7 +23,16 @@ import path, { delimiter, join, posix, win32 } from "node:path";
  */
 export type AgentProtocol = "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc" | "app-server";
 
-export type ModelOption = { id: string; label: string };
+/**
+ * A model picker entry. `id`/`label` are the universal surface every agent's
+ * picker reads. `providerId` is OPTIONAL and ZCode-only (#19 / ADR-0005
+ * decision 4): ZCode's dynamic picker lists models across multiple providers
+ * (GLM, OpenRouter, …), and `session/create` needs `{ providerId, modelId }`
+ * to bind the choice. The invoke layer recovers the `providerId` for a picked
+ * `id` from this field. Absent for every other agent (their picker ids map to
+ * a single provider implicitly, or go to `--model <id>`).
+ */
+export type ModelOption = { id: string; label: string; providerId?: string };
 
 export const DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (CLI config)" };
 
@@ -587,17 +597,28 @@ export function detectAgents(): DetectedAgent[] {
     // tightened that resolver's return to `string` — the Electron-exe fallback
     // is terminal and present whenever detect passed (zcode.cjs found ⟺ ZCode
     // installed ⟺ exe exists), so there is no null to coalesce here.
-    // The picker models are a.fallbackModels ([DEFAULT_MODEL]) — see
-    // ADR-0004 / #13: the child self-authenticates and resolves its own model,
-    // so "Default (CLI config)" is the only entry the picker needs.
+    //
+    // #19 / ADR-0005 decision 4: the picker is populated DYNAMICALLY from
+    // ~/.zcode/v2/config.json when ZCode is available. The read is gated on
+    // the same availability (an unavailable install keeps the static
+    // [DEFAULT_MODEL] floor, so the picker never crashes on a missing config).
+    // readZcodeModelPicker() filters to enabled providers with no
+    // systemDisabledReason (the GUI's resolved, usable set) and returns each
+    // model with its providerId; DEFAULT_MODEL is prepended (= no `model` field
+    // → workspace default wins). model-providers.json is deliberately NOT
+    // read (static catalog with empty apiKeys → would offer unusable models).
     if (protocol === "app-server") {
       const cjs = resolveZcodeBin();
       if (cjs) {
+        const { models: pickerModels } = readZcodeModelPicker();
         return {
           ...base,
           available: true,
           path: cjs,
           resolvedBin: resolveZcodeNodeBin(),
+          // [DEFAULT_MODEL] floor + each enabled provider's models (carrying
+          // providerId for the invoke-layer {providerId, modelId} resolution).
+          models: [DEFAULT_MODEL, ...pickerModels],
         };
       }
       return { ...base, available: false };

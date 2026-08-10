@@ -8,6 +8,7 @@
     ".": "./dist/zcode-protocol.js",
     "./zcode-protocol": "./dist/zcode-protocol.js",
     "./zcode-config": "./dist/zcode-config.js",
+    "./zcode-model-picker": "./dist/zcode-model-picker.js",
     "./zcode-session": "./dist/zcode-session.js",
     "./zcode-stream": "./dist/zcode-stream.js"
   },

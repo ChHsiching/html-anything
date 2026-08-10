@@ -5,7 +5,13 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { deleteTaskRuns, putRun } from "@/lib/history/db";
 
-export type ModelOption = { id: string; label: string };
+/**
+ * A model picker entry. Mirrors the server-side ModelOption in
+ * `lib/agents/detect.ts`. `providerId` is ZCode-only (#19): the picker lists
+ * models across multiple providers and the invoke layer recovers the
+ * `{ providerId, modelId }` pair from it. Absent for every other agent.
+ */
+export type ModelOption = { id: string; label: string; providerId?: string };
 
 export type AgentInfo = {
   id: string;
