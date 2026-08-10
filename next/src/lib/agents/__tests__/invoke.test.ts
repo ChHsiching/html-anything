@@ -193,9 +193,14 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     const events = await eventsPromise;
 
     // spawn called with bin (quoted on win32) + binArgs (no prompt on argv).
+    // On win32 next runs the child through a shell, so every argv element is
+    // quoted (quoteWindowsArg) — matching cli's app-server branch. argv never
+    // carries the prompt; binArgs carries [ZCODE_CJS_SENTINEL, "app-server"].
     expect(mockSpawn).toHaveBeenCalledWith(
       USE_SHELL ? `"/resolved/node"` : "/resolved/node",
-      ["/resolved/zcode.cjs", "app-server"],
+      USE_SHELL
+        ? [`"/resolved/zcode.cjs"`, `"app-server"`]
+        : ["/resolved/zcode.cjs", "app-server"],
       expect.objectContaining({ stdio: ["pipe", "pipe", "pipe"] }),
     );
 
