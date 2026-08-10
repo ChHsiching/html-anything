@@ -518,30 +518,26 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     );
   });
 
-  // T12 (#12): graceful degradation. When NEITHER a node NOR the Electron exe
-  // can be found, the adapter must emit a clear, actionable error — not a
-  // silent hang or an opaque "node not installed".
-  it("emits a clear error when no node AND no Electron exe can be found (T12)", async () => {
-    existsSyncDelegate.mockImplementation((p: string) =>
-      p === "/resolved/zcode.cjs" || p === "/bin/sh",
-    );
-    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-
-    const stream = invokeAgent({ agent: "zcode", prompt: "p" });
-    const events = await collectStream(stream);
-
-    expect(mockSpawn).not.toHaveBeenCalled();
-    const error = events.find((e) => e.type === "error");
-    expect(error).toBeDefined();
-    const msg = (error as { message?: string }).message ?? "";
-    expect(msg).toMatch(/node/i);
-    expect(msg).toMatch(/ZCODE_NODE_BIN|ZCode/i);
-  });
+  // T15 (#18 / ADR-0005 decision 3): the "no node AND no Electron exe" error
+  // path was REMOVED — it was unreachable. detectAgents() reports zcode
+  // available only when zcode.cjs was found ⟺ ZCode is installed ⟺ the
+  // sibling Electron exe exists, so resolveZcodeNodeBin() always hits its
+  // terminal fallback for any caller that reached this code. There is no
+  // error branch left to test; the absence is a static assertion (grep for
+  // the message string is gone). The T12 fallback case above remains the
+  // pin for the real spawn path.
 });
 
 // Regression guards for the argv branch — keep parity with the pre-T6 behavior
 // so the new app-server routing doesn't disturb existing adapters.
 describe("invokeAgent — argv branch (regression)", () => {
+  // Isolate from the app-server describe above: that block legitimately calls
+  // spawn and its beforeEach reset is scoped to its own tests. Reset the mock
+  // here too so the call-count assertion below counts only this block's spawn.
+  beforeEach(() => {
+    mockSpawn.mockReset();
+  });
+
   // #17: quoteWindowsArg is gated to the app-server (ZCode) branch only. The
   // shared argv spawn (every argv / argv-message agent — deepseek-tui,
   // openclaw) must pass argv verbatim, matching the `main` baseline. This pins

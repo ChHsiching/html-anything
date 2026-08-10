@@ -468,17 +468,24 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   // wins; otherwise resolveZcodeNodeBin() discovers node-or-Electron-exe (see
   // its doc comment for the live-proven strategy). Reconciles with
   // resolveZcodeBin() — they own disjoint concerns (.cjs vs node driver).
+  //
+  // T15 (#18 / ADR-0005 decision 3): resolveZcodeNodeBin() now returns `string`
+  // (not `string | null`) — the Electron-exe fallback is terminal and
+  // guaranteed-present whenever detect passed (zcode.cjs found ⟺ ZCode
+  // installed ⟺ exe exists), so there is no "node binary not found" branch
+  // here. Only the binOverride-missing error remains (a user-supplied path that
+  // does not resolve is a real, reachable typo the user deserves to see).
   if (def.protocol === "app-server") {
-    let bin: string | null = null;
+    let bin: string;
     if (opts.binOverride && opts.binOverride.trim()) {
       const tried = opts.binOverride.trim();
       if (/^([a-zA-Z]:[\\/]|[\\/])/.test(tried)) {
-        bin = existsSync(tried) ? tried : null;
+        bin = existsSync(tried) ? tried : "";
       } else if (tried.includes("/") || tried.includes("\\") || tried.startsWith(".")) {
         const abs = path.resolve(tried);
-        bin = existsSync(abs) ? abs : null;
+        bin = existsSync(abs) ? abs : "";
       } else {
-        bin = resolveOnPath(tried);
+        bin = resolveOnPath(tried) ?? "";
       }
       if (!bin) {
         return errorStream(
@@ -487,14 +494,6 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       }
     } else {
       bin = resolveZcodeNodeBin();
-      if (!bin) {
-        return errorStream(
-          `${def.label}: could not find a node binary to drive zcode.cjs. ` +
-            `Install Node.js, point ZCODE_NODE_BIN at a node/ZCode.exe path, ` +
-            `or install ZCode so its bundled Electron executable can be used ` +
-            `(under ELECTRON_RUN_AS_NODE=1).`,
-        );
-      }
     }
     return invokeAppServerAgent({ def, bin, opts });
   }

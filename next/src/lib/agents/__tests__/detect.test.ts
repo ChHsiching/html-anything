@@ -134,8 +134,16 @@ describe("ZCode agent registration (T7)", () => {
 
     expect(zcode.available).toBe(true);
     expect(zcode.path).toBe("/opt/zcode/zcode.cjs");
-    // Spawned as `node <cjs> app-server`: resolvedBin is the node bin.
-    expect(zcode.resolvedBin).toBe("node");
+    // T15 (#18 / ADR-0005 decision 3): resolveZcodeNodeBin() now returns
+    // `string` (not `string | null`), so detectAgents() no longer coalesces
+    // to the literal `node`. resolvedBin is the node driver the spawn will
+    // use — a non-empty string (the resolver never returns null). We don't
+    // pin the exact path here: existsSync admits only the .cjs in this
+    // scenario, so the resolver falls through to its terminal Electron-exe
+    // candidate, whose exact value is an install-layout detail covered by
+    // the dedicated resolveZcodeNodeBin cases below.
+    expect(typeof zcode.resolvedBin).toBe("string");
+    expect((zcode.resolvedBin ?? "").length).toBeGreaterThan(0);
     expect(zcode.protocol).toBe("app-server");
     // app-server IS implemented (T6) — must not be flagged unsupported
     // (unlike the acp/pi-rpc family).
@@ -286,10 +294,22 @@ describe("resolveZcodeNodeBin (T12)", () => {
     expect(resolveZcodeNodeBin()).toBe(expected);
   });
 
-  it("returns null when nothing is found (no throw)", () => {
-    stubPlatform("darwin");
-    existsSyncMock.mockReturnValue(false);
+  // T15 (#18 / ADR-0005 decision 3): the Electron-exe fallback is the TERMINAL
+  // step of the probe chain. detectAgents() reports zcode available only when
+  // zcode.cjs was found ⟺ ZCode is installed ⟺ the sibling Electron exe
+  // exists, so any caller reaching this code sees a hit here. The return type
+  // is therefore `string` (not `string | null`); this case pins that the
+  // fallback yields a non-empty path, and the type itself is the compile-time
+  // proof the old null outcome is gone.
+  it("returns a non-empty string when the Electron-exe fallback exists (T15)", () => {
+    stubPlatform("win32");
+    existsSyncMock.mockImplementation(
+      (p) => p === "C:\\Program Files\\ZCode\\ZCode.exe",
+    );
 
-    expect(resolveZcodeNodeBin()).toBeNull();
+    const result = resolveZcodeNodeBin();
+    expect(typeof result).toBe("string");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result).toBe("C:\\Program Files\\ZCode\\ZCode.exe");
   });
 });

@@ -1052,29 +1052,13 @@ describe("invokeAgent", () => {
       );
     });
 
-    // T12 (#12): graceful degradation. When NEITHER a node NOR the Electron exe
-    // can be found (e.g. ZCode uninstalled, no system node), the adapter must
-    // emit a clear, actionable error — not a silent hang or an opaque
-    // "node not installed". The error names the node resolution problem and
-    // points at the fallback knobs (ZCODE_NODE_BIN / install ZCode).
-    it("emits a clear error when no node AND no Electron exe can be found (T12)", async () => {
-      // No binOverride; existsSync admits only the .cjs (no node, no exe).
-      existsSyncDelegate.mockImplementation((p: string) =>
-        p === "/resolved/zcode.cjs" || p === "/bin/sh",
-      );
-      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-
-      const stream = invokeAgent({ agent: "zcode", prompt: "p" });
-      const events = await collectStream(stream);
-
-      // spawn must NEVER have been called — we failed before spawning.
-      expect(mockSpawn).not.toHaveBeenCalled();
-      const error = events.find((e) => e.type === "error");
-      expect(error).toBeDefined();
-      const msg = (error as { message?: string }).message ?? "";
-      // Names the node resolution problem and points at the fallback knobs.
-      expect(msg).toMatch(/node/i);
-      expect(msg).toMatch(/ZCODE_NODE_BIN|ZCode/i);
-    });
+    // T15 (#18 / ADR-0005 decision 3): the "no node AND no Electron exe" error
+    // path was REMOVED — it was unreachable. detectAgents() reports zcode
+    // available only when zcode.cjs was found ⟺ ZCode is installed ⟺ the
+    // sibling Electron exe exists, so resolveZcodeNodeBin() always hits its
+    // terminal fallback for any caller that reached this code. There is no
+    // error branch left to test; the absence is a static assertion (grep for
+    // the message string is gone). The T12 fallback case above remains the
+    // pin for the real spawn path.
   });
 });

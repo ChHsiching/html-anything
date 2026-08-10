@@ -559,10 +559,22 @@ export function defaultZcodeCjsPaths(): string[] {
  *      ships in the install tree (verified by walking it). See
  *      {@link defaultZcodeElectronExePaths} for the per-platform exe locations.
  *
- * Returns `null` (never throws) when nothing is found — callers surface a clear
- * error rather than letting the spawn fail opaquely.
+ * Returns a non-empty path (never `null`, never throws). Step 3 — the bundled
+ * Electron exe — is the TERMINAL fallback: `detectAgents()` reports
+ * `zcode: available:true` only when `resolveZcodeBin()` found `zcode.cjs`, and
+ * `zcode.cjs` existing ⟺ ZCode is installed ⟺ the same install directory holds
+ * the bundled Electron exe. So for any UI-driven caller the probe hits one of
+ * the three steps and the `null` outcome is unreachable; its return type was
+ * tightened from `string | null` to `string` (T15 / #18 / ADR-0005 decision 3).
+ * The one caller that can still miss all three probes is a hand-crafted
+ * `ZCODE_BIN` at an orphaned `.cjs` (no sibling exe, no system node, no
+ * `ZCODE_NODE_BIN`) — for that path the resolver returns the canonical install
+ * location and lets the spawn's own ENOENT surface the real problem, rather
+ * than a misleading "install Node.js" message. If ZCode's install layout ever
+ * changes so the exe is no longer co-located with the `.cjs`, the fix is a new
+ * probe target here — not a user-facing error.
  */
-export function resolveZcodeNodeBin(): string | null {
+export function resolveZcodeNodeBin(): string {
   const env = process.env;
   const override = env.ZCODE_NODE_BIN?.trim();
   if (override) {
@@ -572,10 +584,16 @@ export function resolveZcodeNodeBin(): string | null {
   }
   const pathNode = resolveOnPath("node");
   if (pathNode) return pathNode;
-  for (const candidate of defaultZcodeElectronExePaths()) {
+  // Step 3: the bundled Electron exe is the terminal fallback. The last
+  // candidate in defaultZcodeElectronExePaths() is the canonical install
+  // location, present whenever the caller reached this code via detectAgents()
+  // (zcode.cjs found ⟺ ZCode installed ⟺ exe exists). Return it on the miss
+  // path too — see the doc comment above for the orphaned-.cjs rationale.
+  const electronPaths = defaultZcodeElectronExePaths();
+  for (const candidate of electronPaths) {
     if (existsSync(candidate)) return candidate;
   }
-  return null;
+  return electronPaths[electronPaths.length - 1];
 }
 
 /**
@@ -648,15 +666,14 @@ export function detectAgents(): DetectedAgent[] {
     // ZCODE_BIN, PATH, and platform defaults). The generic PATH branch below
     // would wrongly report `node` (bin) as the install, so ZCode gets its own
     // detection: available iff the .cjs resolves. resolvedBin is the node
-    // driver the spawn path will use (node <cjs> app-server) — T12 reconciles
-    // this with the invoke layer: it reports resolveZcodeNodeBin() (the real
-    // node or Electron-exe fallback) when one resolves, else the literal
-    // `node` (kept so the picker still shows the agent even on a host where
-    // node has not yet been installed; the invoke layer re-resolves at spawn
-    // time and emits a clear error if nothing is found). The picker models are
-    // a.fallbackModels ([DEFAULT_MODEL]) — see ADR-0004 / #13: the child
-    // self-authenticates and resolves its own model, so "Default (CLI config)"
-    // is the only entry the picker needs.
+    // driver the spawn path will use (node <cjs> app-server): resolveZcodeNodeBin()
+    // (the real node or Electron-exe fallback). T15 (#18 / ADR-0005 decision 3)
+    // tightened that resolver's return to `string` — the Electron-exe fallback
+    // is terminal and present whenever detect passed (zcode.cjs found ⟺ ZCode
+    // installed ⟺ exe exists), so there is no null to coalesce here.
+    // The picker models are a.fallbackModels ([DEFAULT_MODEL]) — see
+    // ADR-0004 / #13: the child self-authenticates and resolves its own model,
+    // so "Default (CLI config)" is the only entry the picker needs.
     if (protocol === "app-server") {
       const cjs = resolveZcodeBin();
       if (cjs) {
@@ -664,7 +681,7 @@ export function detectAgents(): DetectedAgent[] {
           ...base,
           available: true,
           path: cjs,
-          resolvedBin: resolveZcodeNodeBin() ?? a.bin,
+          resolvedBin: resolveZcodeNodeBin(),
         };
       }
       return { ...base, available: false };
