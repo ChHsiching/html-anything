@@ -468,6 +468,18 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
   let child: ChildProcessWithoutNullStreams | null = null;
   let turnUnsubscribe: (() => void) | null = null;
   let client: ReturnType<typeof createZcodeProtocolClient> | null = null;
+  // #22 / spec #20 N2: the silence-timer handle is lifted here (sibling to
+  // `child`) so `cancel` — a ReadableStream sibling, NOT inside `start` — can
+  // clear it on teardown. `clearSilenceTimer` has no closure deps beyond this
+  // handle, so it lifts cleanly. `resetSilenceTimer` stays inside `start`
+  // because its fire callback closes over `safeEnqueue` + `finish`.
+  let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearSilenceTimer = () => {
+    if (silenceTimer !== null) {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  };
 
   return new ReadableStream<InvokeEvent>({
     async start(controller) {
@@ -493,7 +505,35 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           child?.kill("SIGTERM");
         } catch {}
       };
+
+      // #22 / spec #20 N2: turn-silence timer. The post-session/send window is
+      // the only unbounded await in the turn — if the model's turn never
+      // completes (stuck tool, runaway reasoning, dropped terminal event) the
+      // stream would hang forever emitting nothing. This is a SILENCE timeout,
+      // not a hard turn cap: it arms once the turn driver has resolved (after
+      // session/send returns) and resets on EVERY onEvent call (including
+      // thinking_delta, the model's "I'm still alive" signal during deep
+      // reasoning) so legitimately long agentic turns keep running as long as
+      // events keep arriving. Only 180s of ZERO events fires. Do NOT arm
+      // earlier — the once-per-boot model relay (ensureWorkspaceModel) can
+      // legitimately take seconds and must not be on the silence clock. The
+      // handle + clearSilenceTimer are lifted above start() so cancel() can
+      // clear them too; resetSilenceTimer stays here (closes over finish +
+      // safeEnqueue).
+      const resetSilenceTimer = () => {
+        clearSilenceTimer();
+        silenceTimer = setTimeout(() => {
+          silenceTimer = null;
+          safeEnqueue({
+            type: "error",
+            message: "zcode turn went silent for 180s (no events from the model)",
+          });
+          finish(1);
+        }, 180_000);
+      };
+
       const teardown = () => {
+        clearSilenceTimer();
         try {
           turnUnsubscribe?.();
         } catch {}
@@ -560,6 +600,7 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       const finish = (code: number | null) => {
         if (turnEnded) return;
         turnEnded = true;
+        clearSilenceTimer();
         safeEnqueue({ type: "done", code });
         teardown();
       };
@@ -577,6 +618,11 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       const toolNamesById = new Map<string, string>();
 
       const onEvent = (event: Record<string, unknown>) => {
+        // #22 / spec #20 N2: reset the silence clock as the FIRST statement,
+        // before any early-return guard — ANY event (including thinking_delta,
+        // the weakest liveness signal) refreshes it. This is what distinguishes
+        // "model working slowly" from "turn genuinely dead".
+        resetSilenceTimer();
         if (closed || turnEnded) return;
         const type = typeof event.type === "string" ? event.type : "";
         if (type === "text_delta") {
@@ -649,9 +695,10 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
         // thinking_*, conversation_title, etc. are not part of the InvokeEvent
         // surface today; intentionally dropped (tool_use/tool_result are handled
         // above). thinking_* would flood the stream; the spec #20 grilling
-        // rejected forwarding them. (N2 will reset a silence timer on every
-        // onEvent call — including thinking_delta — but that is a separate
-        // ticket.)
+        // rejected forwarding them. (N2 / #22 resets the silence timer on every
+        // onEvent call — including thinking_delta — via the resetSilenceTimer()
+        // at the top of this function, even though these events are dropped
+        // here.)
       };
 
       // The child dying before the turn resolves is an error (the protocol
@@ -696,6 +743,13 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           ...(model ? { model } : {}),
         });
         turnUnsubscribe = turn.unsubscribe;
+        // #22 / spec #20 N2: the turn driver has resolved — session/send has
+        // returned and the turn is genuinely running. Arm the silence timer
+        // HERE (not earlier): the once-per-boot model relay above can
+        // legitimately take seconds and must not be on the silence clock. Any
+        // onEvent call from here on resets it; finish()/teardown()/cancel()
+        // disarm it.
+        resetSilenceTimer();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         safeEnqueue({ type: "error", message });
@@ -714,6 +768,7 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       // Stream consumer cancelled: detach the turn listener, dispose the
       // client, and kill the child. We do NOT enqueue here — the
       // ReadableStream guarantees no further enqueue after cancel.
+      clearSilenceTimer();
       try {
         turnUnsubscribe?.();
       } catch {}

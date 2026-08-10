@@ -851,6 +851,287 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
       model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" },
     });
   });
+
+  // ─── #22 / spec #20 N2: turn-silence timeout ───────────────────────────
+  //
+  // The post-`session/send` window is the only unbounded await in the turn.
+  // #22 installs a 180s SILENCE timer (not a hard turn cap): it arms after the
+  // turn driver resolves and resets on EVERY onEvent call (including the
+  // dropped thinking_delta — the model's "I'm still alive" signal during deep
+  // reasoning), so legitimately long agentic turns keep running as long as
+  // events keep arriving. Only 180s of ZERO events fires an error + finish(1).
+  //
+  // The four tests below use vi.useFakeTimers() so the 180s clock is advanced
+  // instantly. The fake timers do NOT intercept process.nextTick / PassThrough
+  // 'data' delivery, so the protocol client's request/response cycle (and the
+  // resulting onEvent calls) still drain naturally — we only advance the
+  // silence clock, not the microtask queue. afterEach restores real timers so
+  // sibling tests (real setTimeout(0) flush) are unaffected.
+  //
+  // Helper: drain microtasks + nextTick WITHOUT advancing fake timers. The
+  // async start() runs through ensureWorkspaceModel (2 reqs) +
+  // startZcodeProtocolTurn (3 reqs) + the silence-timer arm; each await yields
+  // at a microtask boundary and the mock child's responses arrive on the next
+  // PassThrough 'data' event (a real nextTick under fake timers). Iterating a
+  // bounded number of times is enough to complete the whole chain.
+
+  const flushMicrotasks = async (iterations = 200) => {
+    for (let i = 0; i < iterations; i++) {
+      await Promise.resolve();
+      await new Promise((r) => process.nextTick(r));
+    }
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // (a) Slow-but-alive: a turn that emits thinking_delta at t=0 and t=179s,
+  // then usage at t=200s, completes with done code 0 and NO silence-error.
+  // This proves long-thinking turns are not falsely aborted — the resets keep
+  // the timer alive across the full 200s. thinking_delta is the weakest signal
+  // (it's dropped from the InvokeEvent surface) but still resets the clock.
+  //
+  // NOTE on the wire shape: the stream handler maps an inbound payload with
+  // `kind:"reasoning_delta"` → onEvent({type:"thinking_delta"}). So the
+  // liveness event is produced by writing a `reasoning_delta` payload; a
+  // `kind:"thinking_delta"` payload would match no branch and be dropped (no
+  // onEvent call → no reset), which is the opposite of what this test wants.
+  it("does not abort a slow-but-alive turn that keeps emitting events (#22)", async () => {
+    vi.useFakeTimers();
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "think hard",
+      binOverride: "/resolved/node",
+    });
+
+    // Drive start() to completion: the 4 JSON-RPC requests resolve, the
+    // silence timer arms, and onEvent is wired. No events yet.
+    await flushMicrotasks();
+
+    const eventsPromise = collectStream(stream);
+
+    // t=0: a reasoning_delta arrives → mapped to onEvent(thinking_delta) →
+    // resetSilenceTimer (180s window, fires at t=180s if nothing resets).
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { kind: "reasoning_delta", delta: "reasoning..." } },
+      })}\n`,
+    );
+    await flushMicrotasks();
+
+    // Advance to t=179s: still inside the first window, emit another
+    // reasoning_delta → resets the clock to t=179+180=359s.
+    vi.advanceTimersByTime(179_000);
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { kind: "reasoning_delta", delta: "still thinking..." } },
+      })}\n`,
+    );
+    await flushMicrotasks();
+
+    // Advance to t=200s and deliver the terminal usage → finish(0). At t=200s
+    // the silence window (armed at t=179, would fire at t=359s) has NOT fired.
+    vi.advanceTimersByTime(21_000);
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await flushMicrotasks();
+    child.emit("close", 0);
+
+    const events = await eventsPromise;
+
+    const errors = events.filter((e) => e.type === "error");
+    const silenceErrors = errors.filter((e) =>
+      /went silent/.test((e as { message?: string }).message ?? ""),
+    );
+    expect(silenceErrors).toHaveLength(0);
+    const done = events.filter((e) => e.type === "done");
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ type: "done", code: 0 });
+  });
+
+  // (b) Genuine silence: the turn driver resolved (timer armed) but NO events
+  // arrive. After 180s the timer fires → emits {type:"error", /went silent/}
+  // and calls finish(1). The stream closes with a non-zero done code. This is
+  // the core robustness guarantee: a dead turn surfaces a clean error instead
+  // of hanging forever.
+  it("fires the silence error + finish(1) after 180s with zero events (#22)", async () => {
+    vi.useFakeTimers();
+    const { child } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node",
+    });
+
+    await flushMicrotasks();
+
+    const eventsPromise = collectStream(stream);
+
+    // Arm happened at t=0 (turn driver resolved). Emit NOTHING for 181s.
+    vi.advanceTimersByTime(181_000);
+    await flushMicrotasks();
+
+    const events = await eventsPromise;
+    const errors = events.filter((e) => e.type === "error");
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect((errors[0] as { message?: string }).message).toMatch(/went silent for 180s/);
+    const done = events.filter((e) => e.type === "done");
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ type: "done", code: 1 });
+  });
+
+  // (c) Reset on tool events: a tool_use arrives at t=170s (inside the first
+  // window) and resets the clock. Genuine silence then must fire at ≈350s
+  // (170+180), NOT ≈180s. This proves the reset logic — a tool call (the
+  // canonical agentic-liveness signal) refreshes the timer just like a delta.
+  it("resets the silence clock on a tool_use event (#22)", async () => {
+    vi.useFakeTimers();
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "use a tool",
+      binOverride: "/resolved/node",
+    });
+
+    await flushMicrotasks();
+
+    const eventsPromise = collectStream(stream);
+
+    // t=0: arm. Advance to t=170s (inside the first 180s window) and emit a
+    // tool_use → resets the clock to t=170+180=350s.
+    vi.advanceTimersByTime(170_000);
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: {
+          payload: {
+            kind: "tool_call",
+            toolCallId: "ws1",
+            toolName: "WebSearch",
+            input: { query: "x" },
+          },
+        },
+      })}\n`,
+    );
+    await flushMicrotasks();
+
+    // Advance past the ORIGINAL 180s window (t=170+179=349s) without crossing
+    // the RESET 350s boundary. The timer must NOT have fired here — if it had,
+    // the stream would already have closed with a silence error + done. We
+    // assert that by reading the next event without blocking: a closed stream
+    // resolves to {done:true}; an open one keeps the read pending. Since
+    // fake-timer advancement is synchronous and we haven't crossed 350s, the
+    // read stays pending — so we cancel it and rely on the cross-350s
+    // assertion below (exactly ONE silence error, not two) to prove no early
+    // fire at t=180s.
+    vi.advanceTimersByTime(179_000); // now at t=349s
+    await flushMicrotasks();
+
+    // Cross the 350s boundary → timer fires.
+    vi.advanceTimersByTime(2_000); // now at t=351s
+    await flushMicrotasks();
+
+    const events = await eventsPromise;
+    const silenceErrors = events.filter(
+      (e) => e.type === "error" && /went silent/.test((e as { message?: string }).message ?? ""),
+    );
+    // Exactly ONE silence error: the reset worked (no fire at the original
+    // t=180s window; the only fire is the reset window at t=350s).
+    expect(silenceErrors).toHaveLength(1);
+    const done = events.filter((e) => e.type === "done");
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ type: "done", code: 1 });
+  });
+
+  // (d) Timer hygiene: after teardown (e.g. the child dies mid-turn), the
+  // silence timer is disarmed and must NOT fire post-teardown. A stray fire
+  // would enqueue an error after close (dropped by safeEnqueue's closed guard,
+  // but the timer should be cleared regardless to avoid leaking / racing).
+  it("clears the silence timer on teardown so no stray fire leaks after close (#22)", async () => {
+    vi.useFakeTimers();
+    const { child } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node",
+    });
+
+    await flushMicrotasks();
+
+    const eventsPromise = collectStream(stream);
+
+    // Tear down mid-turn: the child exits before any terminal event.
+    child.emit("close", 1);
+    await flushMicrotasks();
+
+    const events = await eventsPromise;
+
+    // Advancing way past 180s must not produce a silence error — the timer was
+    // cleared in finish()→teardown() when the close handler ran.
+    vi.advanceTimersByTime(200_000);
+    await flushMicrotasks();
+
+    const silenceErrors = events.filter(
+      (e) => e.type === "error" && /went silent/.test((e as { message?: string }).message ?? ""),
+    );
+    expect(silenceErrors).toHaveLength(0);
+  });
+
+  // (e) Cancel-path disarm: when the STREAM CONSUMER cancels (distinct from
+  // teardown-via-child-death), the silence timer must be cleared in cancel()
+  // — a ReadableStream sibling that does NOT run through finish()/teardown().
+  // This is why `silenceTimer` + `clearSilenceTimer` are hoisted above the
+  // ReadableStream (sibling to `child`): cancel() is not inside start() and
+  // could not otherwise reach them. Covers spec AC "disarmed on ... cancel".
+  //
+  // Detection strategy: cancel() calls child.kill("SIGTERM") exactly once. If
+  // the timer were NOT cleared, advancing past 180s would fire it → finish(1)
+  // → teardown() → child.kill a SECOND time. So assert kill was called exactly
+  // once after advancing — a stray fire would make it twice. (The fake child
+  // lacks a real `kill` — it's an EventEmitter + streams, not a ChildProcess
+  // — so we attach a spy directly; production wraps it in try/catch.)
+  it("clears the silence timer when the stream consumer cancels (#22)", async () => {
+    vi.useFakeTimers();
+    const { child } = makeAppServerChild();
+    const killSpy = vi.fn();
+    (child as unknown as { kill: unknown }).kill = killSpy;
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node",
+    });
+
+    await flushMicrotasks();
+
+    await stream.cancel();
+    await flushMicrotasks();
+
+    // cancel() killed the child once. Now advance past 180s — if the timer
+    // survived, its fire would call finish()→teardown()→child.kill again.
+    vi.advanceTimersByTime(200_000);
+    await flushMicrotasks();
+
+    expect(killSpy).toHaveBeenCalledTimes(1);
+  });
 });
 
 // Regression guards for the argv branch — keep parity with the pre-T6 behavior
