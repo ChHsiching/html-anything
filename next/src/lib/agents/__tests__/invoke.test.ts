@@ -591,6 +591,53 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     expect(events.some((e) => e.type === "delta")).toBe(false);
   });
 
+  // #25 follow-up: ZCode generates a conversation title (source:"generated");
+  // the protocol layer surfaces it as a conversation_title event. Forward as a
+  // meta so it isn't silently dropped. Uses the existing `meta` type (no union
+  // change); formatMeta's generic fallback renders `conversation_title: <t>`.
+  it("forwards conversation_title as a meta event (#25 follow-up)", async () => {
+    const { child, stdout } = makeAppServerChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    // source:"generated" title → conversation_title event (a first_input title
+    // without source:"generated" is dropped by the protocol layer, not here).
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { title: "闭包小课", source: "generated" } },
+      })}\n`,
+    );
+    stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+
+    const events = await eventsPromise;
+    const titleMetas = events.filter(
+      (e) => e.type === "meta" && (e as { key?: string }).key === "conversation_title",
+    );
+    expect(titleMetas).toHaveLength(1);
+    expect(titleMetas[0]).toMatchObject({
+      type: "meta",
+      key: "conversation_title",
+      value: "闭包小课",
+    });
+  });
+
   it("final-result usage → {type:'done', code:0}", async () => {
     const { child, stdout } = makeAppServerChild();
     mockSpawn.mockReturnValue(child);

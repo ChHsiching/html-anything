@@ -850,9 +850,18 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           if (delta) safeEnqueue({ type: "meta", key: "thinking", value: delta });
           return;
         }
-        // conversation_title etc. are not part of the InvokeEvent surface
-        // today; intentionally dropped (text_delta / tool_use / tool_result /
-        // thinking_delta are handled above).
+        // ZCode generates a conversation title (source:"generated"); the
+        // protocol layer surfaces it as a conversation_title event. Forward it
+        // as a meta so it isn't silently dropped — uses the existing `meta`
+        // InvokeEvent (no union change); formatMeta's generic fallback renders
+        // `conversation_title: <title>`.
+        if (type === "conversation_title") {
+          const title = typeof event.title === "string" ? event.title : "";
+          if (title) safeEnqueue({ type: "meta", key: "conversation_title", value: title });
+          return;
+        }
+        // Any other/unmapped kind the protocol layer may emit in future is
+        // dropped here (today nothing reaches this point).
       };
 
       // The child dying before the turn resolves is an error (the protocol

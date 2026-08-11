@@ -1052,8 +1052,15 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           if (delta) safeEnqueue({ type: "meta", key: "thinking", value: delta });
           return;
         }
-        // conversation_title, tool_result, etc. are not part of the InvokeEvent
-        // surface today; intentionally dropped.
+        // ZCode conversation_title → meta (mirrors next/; uses existing meta
+        // type, no union change).
+        if (type === "conversation_title") {
+          const title = typeof event.title === "string" ? event.title : "";
+          if (title) safeEnqueue({ type: "meta", key: "conversation_title", value: title });
+          return;
+        }
+        // tool_result, etc. are not part of the InvokeEvent surface today;
+        // intentionally dropped.
       };
 
       // The child dying before the turn resolves is an error (the protocol
