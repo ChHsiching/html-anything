@@ -831,13 +831,28 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           finish(1);
           return;
         }
-        // thinking_*, conversation_title, etc. are not part of the InvokeEvent
-        // surface today; intentionally dropped (tool_use/tool_result are handled
-        // above). thinking_* would flood the stream; the spec #20 grilling
-        // rejected forwarding them. (N2 / #22 resets the silence timer on every
-        // onEvent call — including thinking_delta — via the resetSilenceTimer()
-        // at the top of this function, even though these events are dropped
-        // here.)
+        // #25 (supersedes ADR-0006 Decision 1): forward the model's reasoning
+        // stream as {type:"meta", key:"thinking"} — the EXACT event shape the
+        // Claude Code argv path emits (argv.ts: thinking_delta content block →
+        // {kind:"meta", key:"thinking", value}) and the shared frontend
+        // `formatMeta` renders as `thinking …`. A live comparison (hsiarch,
+        // 2026-08-12) showed Claude Code streams the same per-fragment thinking
+        // lines and that continuous flow is good UX; ZCode's reasoning was a
+        // black box ONLY because this layer dropped it, not because of any
+        // model/protocol limit (a probe captured 70+ reasoning_delta frames
+        // from ZCode + GLM-5.2). thinking_start carries no payload and is
+        // ignored (early-return) so it produces no empty/garbage log line. HTML
+        // output is unaffected: it travels the separate text_delta → delta
+        // channel and never mixes with thinking.
+        if (type === "thinking_start") return;
+        if (type === "thinking_delta") {
+          const delta = typeof event.delta === "string" ? event.delta : "";
+          if (delta) safeEnqueue({ type: "meta", key: "thinking", value: delta });
+          return;
+        }
+        // conversation_title etc. are not part of the InvokeEvent surface
+        // today; intentionally dropped (text_delta / tool_use / tool_result /
+        // thinking_delta are handled above).
       };
 
       // The child dying before the turn resolves is an error (the protocol

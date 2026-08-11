@@ -1040,8 +1040,20 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
           finish(1);
           return;
         }
-        // thinking_*, conversation_title, tool_result, etc. are not part of the
-        // InvokeEvent surface today; intentionally dropped.
+        // #25 (supersedes ADR-0006 Decision 1): forward the model's reasoning
+        // stream as {type:"meta", key:"thinking"} — the exact event shape the
+        // Claude Code argv path emits and the shared `formatMeta` renders as
+        // `thinking …`. thinking_start carries no payload and is ignored
+        // (early-return). HTML output is unaffected (separate text_delta →
+        // delta channel). Mirrors the next/ app-server onEvent.
+        if (type === "thinking_start") return;
+        if (type === "thinking_delta") {
+          const delta = typeof event.delta === "string" ? event.delta : "";
+          if (delta) safeEnqueue({ type: "meta", key: "thinking", value: delta });
+          return;
+        }
+        // conversation_title, tool_result, etc. are not part of the InvokeEvent
+        // surface today; intentionally dropped.
       };
 
       // The child dying before the turn resolves is an error (the protocol

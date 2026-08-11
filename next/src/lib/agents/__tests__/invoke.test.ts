@@ -518,11 +518,21 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     expect(statusMetas).toEqual(["调用工具 WebSearch", "工具 WebSearch 完成"]);
   });
 
-  // #21: thinking_delta is the model's high-frequency reasoning signal. The
-  // spec #20 grilling rejected forwarding it (would flood the stream), so it
-  // must produce NO meta status event. (N2, a separate ticket, will reset a
-  // silence timer on it — but N1 deliberately drops it.)
-  it("does not emit a meta for thinking_delta (still dropped, #21)", async () => {
+  // #25 (supersedes ADR-0006 Decision 1): the model's reasoning stream is now
+  // FORWARDED as {type:"meta", key:"thinking"} — the exact event shape the
+  // Claude Code argv path emits and `formatMeta` renders as `thinking …`. A
+  // live comparison (hsiarch, 2026-08-12) showed Claude streams the same
+  // per-fragment thinking lines and that continuous flow is good UX; ZCode was
+  // a black box only because this layer dropped it. The prior #21 test
+  // asserted the drop; this test asserts the forwarding.
+  //
+  // Wire note: the stream handler maps an inbound payload with
+  // `kind:"reasoning_delta"` → onEvent({type:"thinking_start"}) once, then
+  // onEvent({type:"thinking_delta", delta}). So the reasoning fragments MUST
+  // be written as `reasoning_delta` payloads; a `kind:"thinking_delta"` payload
+  // matches no branch and is dropped before onEvent (see test (c) of the #22
+  // block for the same gotcha).
+  it("forwards reasoning_delta as a meta thinking event per fragment (#25)", async () => {
     const { child, stdout } = makeAppServerChild();
     mockSpawn.mockReturnValue(child);
 
@@ -538,13 +548,13 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     stdout.write(
       `${JSON.stringify({
         method: "session/event",
-        params: { payload: { kind: "thinking_delta", delta: "reasoning..." } },
+        params: { payload: { kind: "reasoning_delta", delta: "reasoning..." } },
       })}\n`,
     );
     stdout.write(
       `${JSON.stringify({
         method: "session/event",
-        params: { payload: { kind: "thinking_delta", delta: "more..." } },
+        params: { payload: { kind: "reasoning_delta", delta: "more..." } },
       })}\n`,
     );
     stdout.write(
@@ -558,13 +568,27 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     child.emit("close", 0);
 
     const events = await eventsPromise;
-    const statusMetas = events.filter(
-      (e) => e.type === "meta" && (e as { key?: string }).key === "status",
+    // Each reasoning_delta fragment → one {type:"meta", key:"thinking"} event
+    // carrying the fragment as its value (matching Claude's argv path shape).
+    const thinkingMetas = events.filter(
+      (e) => e.type === "meta" && (e as { key?: string }).key === "thinking",
     );
-    expect(statusMetas).toHaveLength(0);
-    // The only meta on the stream should be the terminal usage one.
-    const metas = events.filter((e) => e.type === "meta");
-    expect(metas.map((m) => (m as { key?: string }).key)).toEqual(["usage"]);
+    expect(thinkingMetas.map((m) => (m as { value?: unknown }).value)).toEqual([
+      "reasoning...",
+      "more...",
+    ]);
+    // thinking_start (fired once before the first fragment) carries no payload
+    // and is ignored — it must NOT produce an empty/garbage meta line.
+    const allMetas = events.filter((e) => e.type === "meta");
+    expect(allMetas.map((m) => (m as { key?: string }).key)).toEqual([
+      "thinking",
+      "thinking",
+      "usage",
+    ]);
+    // HTML / formal output is unaffected — reasoning travels its own channel;
+    // no html or delta events mix in.
+    expect(events.some((e) => e.type === "html")).toBe(false);
+    expect(events.some((e) => e.type === "delta")).toBe(false);
   });
 
   it("final-result usage → {type:'done', code:0}", async () => {
