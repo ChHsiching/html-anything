@@ -97,13 +97,24 @@ export function createZcodeStreamHandler(onEvent: ZcodeEventSink): ZcodeStreamHa
       return;
     }
 
+    // ZCode emits TWO result-carrying frame kinds for the same tool call:
+    //   - kind:"result"      — carries {result:{content, success}} + toolName
+    //   - kind:"tool_result" — a "commit anchor" (toolName + committedAt, NO
+    //     content; the actual content already arrived via the `result` frame).
+    // Forward ONLY the content-carrying `result` frame — the commit anchor
+    // adds no information and forwarding both would duplicate every "tool
+    // done" log line. But we DO read `toolName` off the `result` frame itself
+    // (not just rely on the preceding tool_call), so the name is available
+    // even if a tool_call frame arrived late or was dropped.
     if (kind === "result") {
       const id = typeof payload.toolCallId === "string" ? payload.toolCallId : undefined;
       if (!id) return;
+      const name = typeof payload.toolName === "string" ? payload.toolName : undefined;
       const result = isRecord(payload.result) ? payload.result : {};
       onEvent({
         type: "tool_result",
         toolUseId: id,
+        ...(name ? { name } : {}),
         content: stringifyContent(result.content),
         isError: result.success === false,
       });
@@ -111,7 +122,7 @@ export function createZcodeStreamHandler(onEvent: ZcodeEventSink): ZcodeStreamHa
     }
 
     // tool_input_start/delta/end (args streamed as JSON shards), scheduler/exec
-    // bookkeeping (scheduled/started/batch) and the tool_result commit anchor
+    // bookkeeping (scheduled/started/batch), and the tool_result commit anchor
     // add nothing beyond the assembled tool_call + result above.
     if (kind) return;
 

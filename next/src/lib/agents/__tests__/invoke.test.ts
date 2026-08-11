@@ -411,15 +411,17 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     expect(statusMetas[0]).toMatchObject({
       type: "meta",
       key: "status",
-      value: "🔍 WebSearch",
+      value: "调用工具 WebSearch",
     });
     // A non-HTML tool_use must NOT also emit an html event.
     expect(events.some((e) => e.type === "html")).toBe(false);
   });
 
-  // #21: tool_result carries only toolUseId (no name); the adapter recovers the
-  // name from the preceding tool_use and emits "✓ <name>". When the result's
-  // toolUseId was never seen, it falls back to a bare "✓".
+  // #21: tool_result carries a tool name — either on the event itself (the
+  // protocol stream reads it from the frame's `toolName` field) or recovered
+  // from the preceding tool_use via the Map fallback. When neither yields a
+  // name (e.g. an orphan result whose id was never seen), emit NOTHING — a
+  // nameless status line ("✓") is noise worse than no line at all.
   it("forwards a tool_result as a meta status event with the carried tool name (#21)", async () => {
     const { child, stdout } = makeAppServerChild();
     mockSpawn.mockReturnValue(child);
@@ -486,8 +488,10 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     const statusMetas = events
       .filter((e) => e.type === "meta" && (e as { key?: string }).key === "status")
       .map((e) => (e as { value?: unknown }).value);
-    // tool_use meta (🔍) + matched result meta (✓ name) + orphan result meta (✓).
-    expect(statusMetas).toEqual(["🔍 WebSearch", "✓ WebSearch", "✓"]);
+    // tool_use meta (调用工具) + matched result meta (工具 …完成, name resolved
+    // via Map fallback since this `result` frame has no toolName). The orphan
+    // result (id never seen, no toolName) emits NOTHING — no nameless status.
+    expect(statusMetas).toEqual(["调用工具 WebSearch", "工具 WebSearch 完成"]);
   });
 
   // #21: thinking_delta is the model's high-frequency reasoning signal. The

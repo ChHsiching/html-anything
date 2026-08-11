@@ -180,6 +180,50 @@ describe("createZcodeStreamHandler — tool_use / tool_result", () => {
       isError: true,
     });
   });
+
+  // ZCode emits the frame's own `toolName` on result-carrying frames; the
+  // handler forwards it so the consumer can display the tool name without a
+  // fragile tool_call→result ordering dependency (live-proven by #23 probe).
+  it("forwards toolName on a `result` frame when present", () => {
+    const onEvent = vi.fn();
+    const stream = createZcodeStreamHandler(onEvent);
+
+    stream.handleFrame(
+      sessionEvent({
+        kind: "result",
+        toolCallId: "tc9",
+        toolName: "WebSearch",
+        result: { content: "hits", success: true },
+      }),
+    );
+
+    expect(onEvent).toHaveBeenCalledWith({
+      type: "tool_result",
+      toolUseId: "tc9",
+      name: "WebSearch",
+      content: "hits",
+      isError: false,
+    });
+  });
+
+  // ZCode also emits a distinct kind:"tool_result" commit-anchor frame (carries
+  // toolName + committedAt, NO result content). It is intentionally DROPPED —
+  // the content already arrived via the `result` frame above, and forwarding
+  // both would duplicate every "tool done" log line.
+  it("drops the kind:tool_result commit-anchor frame (content already delivered via kind:result)", () => {
+    const onEvent = vi.fn();
+    const stream = createZcodeStreamHandler(onEvent);
+
+    stream.handleFrame(
+      sessionEvent({
+        kind: "tool_result",
+        toolCallId: "tc7",
+        toolName: "read_file",
+      }),
+    );
+
+    expect(onEvent).not.toHaveBeenCalled();
+  });
 });
 
 describe("createZcodeStreamHandler — usage & error & title", () => {

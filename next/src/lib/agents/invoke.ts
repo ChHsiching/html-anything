@@ -606,15 +606,20 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       };
 
       // #21 / spec #20 N1: the protocol stream maps tool_call→{type:"tool_use",
-      // id, name} and result→{type:"tool_result", toolUseId} — neither carries
-      // user-visible text, so without this bridge the SSE stream emits zero
-      // bytes during the model's tool window (e.g. a multi-second WebSearch),
-      // freezing the UI. Forward both as {type:"meta", key:"status"} so the
-      // bytes keep flowing (byte-level keepalive) and a future frontend can
-      // surface progress without further adapter work. `meta` is already in
+      // id, name} and result→{type:"tool_result", toolUseId, name} — neither
+      // carries user-visible text, so without this bridge the SSE stream emits
+      // zero bytes during the model's tool window (e.g. a multi-second
+      // WebSearch), freezing the UI. Forward both as {type:"meta", key:"status"}
+      // so the bytes keep flowing (byte-level keepalive) and a future frontend
+      // can surface progress without further adapter work. `meta` is already in
       // the InvokeEvent union (openclaw emits it for model/session/result), so
-      // this adds no new event type. tool_result only carries toolUseId, so
-      // the human-readable name is carried here from the preceding tool_use.
+      // this adds no new event type.
+      //
+      // Name resolution: the `tool_result` event from the protocol stream now
+      // carries the tool name directly (read from the frame's own `toolName`
+      // field). We still keep a `toolNamesById` Map as a fallback for any
+      // result event that arrives without a name (defensive — the protocol
+      // layer adds it whenever the frame carries one).
       const toolNamesById = new Map<string, string>();
 
       const onEvent = (event: Record<string, unknown>) => {
@@ -643,21 +648,24 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
             safeEnqueue({ type: "html", text: html });
           } else if (name) {
             // Non-HTML tool_use (e.g. WebSearch) → forward as a meta status so
-            // the stream keeps flowing during the tool window (#21).
-            safeEnqueue({ type: "meta", key: "status", value: `🔍 ${name}` });
+            // the stream keeps flowing during the tool window (#21). Wording
+            // follows the log panel's natural-description convention (no emoji).
+            safeEnqueue({ type: "meta", key: "status", value: `调用工具 ${name}` });
           }
           return;
         }
         if (type === "tool_result") {
-          // tool_result carries only toolUseId (no name); recover the name from
-          // the preceding tool_use, falling back to a bare ✓ when untracked.
+          // Prefer the name carried on the event itself (protocol stream reads
+          // it from the frame's `toolName` field); fall back to the Map only
+          // if the event arrives nameless. If neither yields a name, emit
+          // nothing — a nameless status line is noise (the log panel shows a
+          // bare ✓ with no context, worse than no line at all).
           const toolUseId = typeof event.toolUseId === "string" ? event.toolUseId : "";
-          const name = (toolUseId && toolNamesById.get(toolUseId)) ?? "";
-          safeEnqueue({
-            type: "meta",
-            key: "status",
-            value: name ? `✓ ${name}` : "✓",
-          });
+          const carriedName = typeof event.name === "string" ? event.name : "";
+          const name = carriedName || (toolUseId && toolNamesById.get(toolUseId)) || "";
+          if (name) {
+            safeEnqueue({ type: "meta", key: "status", value: `工具 ${name} 完成` });
+          }
           return;
         }
         if (type === "usage") {
