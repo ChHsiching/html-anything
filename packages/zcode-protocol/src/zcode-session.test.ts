@@ -572,3 +572,137 @@ describe("startZcodeProtocolTurn — failure cleanup", () => {
     expect(unsubscribed).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// startZcodeProtocolTurn — interaction/requestPermission auto-approve (#23).
+// The ZCode app-server issues interaction/requestPermission whenever the model
+// calls a side-effecting tool (WebSearch, web-fetch, Bash, …). The child
+// BLOCKS on the reply — until the client responds with one of the request's
+// options[*].response, no further model events are emitted, so a headless
+// adapter that never answers hangs the turn forever (the true root cause of
+// the SSE tool-silence stall that #21/#22 papered over / detected). The turn
+// driver auto-approves, selecting `allow_project` (GUI's "Always allow in this
+// project"; its permissionUpdates.addRules lets ZCode persist the rule so
+// subsequent same-tool calls do NOT re-trigger the request). Live frame shape
+// is the one captured in issue #23.
+// ---------------------------------------------------------------------------
+
+describe("startZcodeProtocolTurn — interaction/requestPermission auto-approve (#23)", () => {
+  it("responds with the allow_project option's response payload (matching id)", async () => {
+    const client = makeFakeClient({
+      "session/create": { session: { sessionId: "s" } },
+      "session/setMode": { ok: true },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    });
+    const result = await startZcodeProtocolTurn({
+      client,
+      cwd: "/p",
+      mode: "agent",
+      prompt: "x",
+      onEvent: () => {},
+    });
+
+    // Live frame from issue #23 (captured by an instrumented probe during a
+    // stalling run). options are deliberately in NON-priority order to prove
+    // the responder selects by optionId, not array index.
+    client.notificationListener!({
+      id: "server-3",
+      method: "interaction/requestPermission",
+      params: {
+        input: {
+          url: "https://github.com/mattpocock/skills",
+          return_format: "markdown",
+        },
+        reason: "Tool has side effects and requires approval",
+        riskLevel: "medium",
+        toolName: "mcp__chhsich-web-fetch__fetch",
+        toolCallId: "call_fa7783eb5e2e4acfaf1ff3ae",
+        options: [
+          {
+            optionId: "allow_once",
+            response: { decision: "allow", reason: "Approved once" },
+          },
+          {
+            optionId: "allow_project",
+            response: {
+              decision: "allow",
+              permissionUpdates: [
+                {
+                  behavior: "allow",
+                  rules: [
+                    {
+                      toolName: "mcp__chhsich-web-fetch__fetch",
+                      ruleContent: "https://github.com/mattpocock/skills",
+                    },
+                  ],
+                  type: "addRules",
+                },
+              ],
+              reason: "Approved for this project",
+            },
+          },
+          { optionId: "deny", response: { decision: "deny", reason: "Denied" } },
+        ],
+      },
+    });
+
+    // Exactly one respond, carrying the allow_project response object verbatim
+    // and matching the request id. No new wire format — same client.respond
+    // path as session/requestRuntimePreferences.
+    expect(client.responds).toHaveLength(1);
+    expect(client.responds[0]!.id).toBe("server-3");
+    expect(client.responds[0]!.result).toEqual({
+      decision: "allow",
+      permissionUpdates: [
+        {
+          behavior: "allow",
+          rules: [
+            {
+              toolName: "mcp__chhsich-web-fetch__fetch",
+              ruleContent: "https://github.com/mattpocock/skills",
+            },
+          ],
+          type: "addRules",
+        },
+      ],
+      reason: "Approved for this project",
+    });
+    result.unsubscribe();
+  });
+
+  it("falls back to allow_once when allow_project is absent", async () => {
+    const client = makeFakeClient({
+      "session/create": { session: { sessionId: "s" } },
+      "session/setMode": { ok: true },
+      "session/subscribe": { ok: true },
+      "session/send": { ok: true },
+    });
+    const result = await startZcodeProtocolTurn({
+      client,
+      cwd: "/p",
+      mode: "agent",
+      prompt: "x",
+      onEvent: () => {},
+    });
+
+    // No allow_project — only allow_once + deny. Responder must pick
+    // allow_once (the documented fallback), NOT deny.
+    client.notificationListener!({
+      id: "server-7",
+      method: "interaction/requestPermission",
+      params: {
+        toolName: "WebSearch",
+        options: [
+          { optionId: "allow_once", response: { decision: "allow", reason: "once" } },
+          { optionId: "deny", response: { decision: "deny", reason: "no" } },
+        ],
+      },
+    });
+
+    expect(client.responds).toEqual([
+      { id: "server-7", result: { decision: "allow", reason: "once" } },
+    ]);
+    result.unsubscribe();
+  });
+});

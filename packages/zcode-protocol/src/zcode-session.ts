@@ -299,6 +299,75 @@ function makeRequester(
 }
 
 /**
+ * Option-id priority for auto-approving `interaction/requestPermission`
+ * (#23). `allow_project` wins: it aligns with the GUI's "Always allow in this
+ * project" UX and its `permissionUpdates.addRules` payload lets ZCode persist
+ * the rule so subsequent same-tool calls in the turn/project do NOT re-trigger
+ * the request (avoids repeated round-trips and re-stalls). `allow_once` is the
+ * fallback (re-triggers per call — safe but chatty). `deny` is the last-resort
+ * default: a real server can legitimately offer only `deny`, so we honor it
+ * rather than throw, but log a warning since headless auto-deny of a tool the
+ * model chose to call usually means the turn cannot proceed.
+ */
+const PERMISSION_OPTION_PRIORITY = ["allow_project", "allow_once", "deny"] as const;
+
+/**
+ * Pick the response payload to send back for an `interaction/requestPermission`
+ * frame (#23). Returns the chosen option's `response` object verbatim (to be
+ * forwarded to `client.respond` — same wire format as
+ * `session/requestRuntimePreferences`, no new request type), or `null` if the
+ * frame has no usable `options` array (in which case the caller leaves the
+ * request unanswered — the server will eventually time out the turn, which is
+ * the correct degradation: we cannot invent an approval the server did not
+ * offer).
+ *
+ * Live frame shape (issue #23):
+ * ```
+ * { id, method:"interaction/requestPermission",
+ *   params:{ options:[
+ *     {optionId:"allow_once",   response:{decision:"allow",  ...}},
+ *     {optionId:"allow_project",response:{decision:"allow",permissionUpdates:[...]}},
+ *     {optionId:"deny",         response:{decision:"deny",   ...}},
+ *   ] } }
+ * ```
+ */
+function choosePermissionResponse(frame: JsonRecord): JsonRecord | null {
+  const params = isRecord(frame.params) ? frame.params : null;
+  const options = params && Array.isArray(params.options) ? params.options : null;
+  if (!options) return null;
+  // Index options by optionId so the priority order is the single source of
+  // truth — we do NOT depend on the server's array ordering (live frames have
+  // varied order across probes).
+  const byOptionId = new Map<string, JsonRecord>();
+  for (const option of options) {
+    if (
+      isRecord(option) &&
+      typeof option.optionId === "string" &&
+      isRecord(option.response)
+    ) {
+      byOptionId.set(option.optionId, option.response);
+    }
+  }
+  for (const optionId of PERMISSION_OPTION_PRIORITY) {
+    const response = byOptionId.get(optionId);
+    if (response) {
+      if (optionId === "deny") {
+        // Honor a server that offers only `deny`, but surface it — headless
+        // auto-deny of a tool the model chose to call is almost always a turn
+        // that cannot complete. Do NOT throw: the spec is explicit that the
+        // server can legitimately offer only `deny`.
+        console.warn(
+          "[zcode-protocol] interaction/requestPermission: only `deny` option " +
+            "was offered — auto-denying. The model's tool call will not proceed.",
+        );
+      }
+      return response;
+    }
+  }
+  return null;
+}
+
+/**
  * Drive a single app-server turn. On success, returns the live `sessionId` and
  * an `unsubscribe` for the notification listener. On any failure, the listener
  * is detached before re-throwing.
@@ -318,13 +387,24 @@ export async function startZcodeProtocolTurn({
 }: StartZcodeProtocolTurnOptions): Promise<StartedZcodeProtocolTurn> {
   const stream = createZcodeStreamHandler(onEvent);
   const unsubscribe = client.onNotification((frame) => {
-    // Auto-answer the one server→client handshake request the app-server
-    // issues during a turn (live-confirmed #14 probes 3, 8, 12):
-    //   - session/requestRuntimePreferences — fires inside `session/create`
-    //     AND `session/send`; the server blocks the response on this reply and
-    //     validates the result with a Zod schema
-    //     (`nativeSearchEnhancementsEnabled` is a required boolean — #14 probe-13
-    //     is rejected with code -32603, so we send the boolean.
+    // Auto-answer the server→client handshake/permission requests the
+    // app-server issues during a turn:
+    //   - session/requestRuntimePreferences — live-confirmed #14 probes 3, 8,
+    //     12: fires inside `session/create` AND `session/send`; the server
+    //     blocks the response on this reply and validates the result with a
+    //     Zod schema (`nativeSearchEnhancementsEnabled` is a required boolean
+    //     — probe-13 is rejected with code -32603, so we send the boolean).
+    //   - interaction/requestPermission — #23: fires when the model calls a
+    //     tool flagged "has side effects and requires approval" (WebSearch,
+    //     web-fetch, Bash, …). The child BLOCKS on the reply: until the client
+    //     responds with one of the request's `options[*].response`, no further
+    //     model events (`text_delta`, `usage`, `status:completed`) are emitted
+    //     — the turn appears "silent" to the adapter (the true root cause of
+    //     the SSE tool-silence stall that #21/#22 papered over / detected). We
+    //     auto-approve because the orchestrator runs headless: a GUI would pop
+    //     a confirmation dialog, but there is no user to confirm here, so
+    //     leaving it unanswered hangs the turn forever. `allow_project` is
+    //     chosen deliberately (see {@link choosePermissionResponse}).
     //
     // NOTE: `interaction/requestProviderRuntimeHeaders` was previously
     // auto-answered here too, but #14 probes 3 + 12 never observed the server
@@ -334,6 +414,12 @@ export async function startZcodeProtocolTurn({
       typeof frame.id === "string"
     ) {
       client.respond(frame.id, { nativeSearchEnhancementsEnabled: false });
+    } else if (
+      frame.method === "interaction/requestPermission" &&
+      typeof frame.id === "string"
+    ) {
+      const response = choosePermissionResponse(frame);
+      if (response) client.respond(frame.id, response);
     }
     stream.handleFrame(frame);
   });
