@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join, posix, win32 } from "node:path";
 import { readZcodeModelPicker } from "@html-anything/zcode-protocol/zcode-model-picker";
@@ -406,16 +406,96 @@ export function resolveOnPath(bin: string): string | null {
   return null;
 }
 
+// ─── Linux AppImage discovery (ADR-0007) ──────────────────────────────
+//
+// On Linux ZCode ships as an AppImage: a single compressed squashfs file with
+// `zcode.cjs` packed inside, reachable only while the AppImage is mounted.
+// There is no on-disk `.cjs` to probe and no fixed filename — the download is
+// `ZCode-<version>-linux-<arch>.AppImage`. Instead of guessing, we read the
+// XDG `.desktop` entry ZCode itself writes on first GUI launch
+// (`~/.local/share/applications/zcode.desktop`); its `Exec=` line carries the
+// real path whatever the user named/placed the file. The same bar as login —
+// a user must have run ZCode once — and a freedesktop.org standard honoured by
+// every Linux desktop. See ADR-0007 decision 1.
+
+/** Path to the XDG `.desktop` entry ZCode generates on first GUI launch. */
+const ZCODE_DESKTOP_PATH = posix.join(
+  homedir(),
+  ".local",
+  "share",
+  "applications",
+  "zcode.desktop",
+);
+
 /**
- * Locate the ZCode CLI binary. Probe order, first match wins (see
- * CONTEXT.md → "ZCode install discovery"):
+ * Parse the ZCode AppImage path out of a `.desktop` entry's `Exec=` line.
+ * Pure (no I/O) so it can be unit-tested with string fixtures. Returns the
+ * AppImage path, or `null` when the line is absent or malformed.
+ *
+ * ZCode writes an entry like:
+ *
+ *     [Desktop Entry]
+ *     Name=ZCode
+ *     Exec=/home/user/Applications/ZCode-3.7.5-linux-x64.AppImage --no-sandbox %U
+ *     Icon=zcode
+ *     ...
+ *
+ * The first token after `Exec=` is the AppImage path (whatever the user
+ * named/placed the file); trailing flags (`--no-sandbox`, `%U`, …) and the
+ * freedesktop field codes are stripped. See ADR-0007 decision 1.
+ */
+export function parseZcodeDesktopExec(content: string): string | null {
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("Exec=")) continue;
+    const rest = line.slice("Exec=".length).trim();
+    if (!rest) return null;
+    // The path is the first token. Per the freedesktop Desktop Entry Spec a
+    // path containing a reserved character (space) MUST be quoted, so tokenize
+    // with quote-awareness — splitting on whitespace first would truncate
+    // `"/home/u/My Apps/ZCode.AppImage"` at the interior space. A quoted token
+    // (double or single) yields its inner content; otherwise the leading
+    // non-whitespace run is the path. Trailing flags (--no-sandbox, %U, …) and
+    // field codes are dropped. Reject a bare field-code token (malformed entry).
+    const m = rest.match(/^"([^"]*)"|^'([^']*)'|^(\S+)/);
+    const token = m?.[1] ?? m?.[2] ?? m?.[3] ?? "";
+    if (!token || token.startsWith("%")) return null;
+    return token;
+  }
+  return null;
+}
+
+/**
+ * Discover the ZCode AppImage on Linux via the XDG `.desktop` entry ZCode
+ * generates on first GUI launch. The `Exec=` line carries the real path
+ * whatever the user named/placed the file, so no filename guessing or glob is
+ * needed. Returns `null` (never throws) when the entry is missing or malformed
+ * — the caller treats that as "ZCode not found". See ADR-0007 decision 1.
+ */
+export function discoverZcodeAppImage(): string | null {
+  try {
+    if (!existsSync(ZCODE_DESKTOP_PATH)) return null;
+    return parseZcodeDesktopExec(readFileSync(ZCODE_DESKTOP_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the ZCode CLI binary. Probe order, first match wins (see ADR-0007):
  *   1. `ZCODE_BIN` env var — user override (absolute path, else PATH lookup)
  *   2. `zcode` on PATH (Linux `.deb`/AUR; rarely present on Windows/macOS)
- *   3. Platform default install path of the `zcode.cjs` bundle:
+ *   3. Platform default:
  *        Windows : `%ZCODE_WINDOWS_APP_INSTALL_DIR%\resources\glm\zcode.cjs`
  *                  → `C:\Program Files\ZCode\resources\glm\zcode.cjs`
  *        macOS   : `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`
- *        Linux   : `~/Applications/ZCode.AppImage` (AppImage mounts the .cjs)
+ *        Linux   : the AppImage path from the `.desktop` `Exec=` line (the
+ *                  `.cjs` lives inside the mount, so there is no on-disk cjs
+ *                  candidate — the AppImage binary doubles as the availability
+ *                  signal AND the Electron driver, ADR-0007).
+ *
+ * On Windows/macOS the returned path IS the `.cjs` bundle. On Linux it is the
+ * AppImage binary (the `.cjs` path is computed post-mount in the invoke layer).
  *
  * Discovery only — registering ZCode in the `AGENTS` array is T7. Returns
  * `null` (never throws) when nothing is found.
@@ -432,7 +512,15 @@ export function resolveZcodeBin(): string | null {
   // 2. `zcode` registered on PATH (Linux `.deb`/AUR packages do this).
   const pathHit = resolveOnPath("zcode");
   if (pathHit) return pathHit;
-  // 3. Platform default install path of the `.cjs` bundle.
+  // 3. Platform default.
+  if (process.platform === "linux") {
+    // ADR-0007: the `.cjs` lives inside the AppImage mount — there is no
+    // on-disk candidate. Discover the AppImage binary via the `.desktop` entry
+    // and return it (availability + Electron driver + mount source).
+    const appImage = discoverZcodeAppImage();
+    if (appImage && existsSync(appImage)) return appImage;
+    return null;
+  }
   for (const candidate of defaultZcodeCjsPaths()) {
     if (existsSync(candidate)) return candidate;
   }
@@ -467,8 +555,10 @@ export function defaultZcodeCjsPaths(): string[] {
   if (platform === "darwin") {
     return [posix.join("/Applications/ZCode.app", "Contents", "Resources", "glm", "zcode.cjs")];
   }
-  // Linux: AppImage has the `.cjs` mounted inside.
-  return [posix.join(homedir(), "Applications", "ZCode.AppImage")];
+  // Linux: the `.cjs` lives inside the AppImage mount, not on disk — there are
+  // no static `.cjs` candidates. Discovery goes through the `.desktop` entry in
+  // resolveZcodeBin(); see ADR-0007 decision 1.
+  return [];
 }
 
 /**
@@ -520,6 +610,17 @@ export function resolveZcodeNodeBin(): string {
   // location, present whenever the caller reached this code via detectAgents()
   // (zcode.cjs found ⟺ ZCode installed ⟺ exe exists). Return it on the miss
   // path too — see the doc comment above for the orphaned-.cjs rationale.
+  if (process.platform === "linux") {
+    // ADR-0007: on Linux the AppImage IS the Electron driver. Discover it via
+    // the same `.desktop` entry resolveZcodeBin() uses (they are the same
+    // binary). The canonical `~/Applications/ZCode.AppImage` guess is the
+    // terminal fallback so the contract (`string`, never null) holds even for
+    // a hand-crafted caller that bypassed detect — the spawn's own ENOENT then
+    // surfaces the real problem.
+    const appImage = discoverZcodeAppImage();
+    if (appImage && existsSync(appImage)) return appImage;
+    return posix.join(homedir(), "Applications", "ZCode.AppImage");
+  }
   const electronPaths = defaultZcodeElectronExePaths();
   for (const candidate of electronPaths) {
     if (existsSync(candidate)) return candidate;

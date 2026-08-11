@@ -440,6 +440,82 @@ function resolveZcodeTurnModel(modelPick: string | undefined): ZcodeTurnModel | 
   return { providerId: chosen.providerId, modelId: chosen.id };
 }
 
+/**
+ * Self-mount the ZCode AppImage (ADR-0007 decision 2). Spawns
+ * `AppImage --appimage-mount`, which prints the FUSE mount point to stdout
+ * (first line) and stays alive holding the mount for as long as it runs.
+ * Returns the mount child (killed on teardown) and the resolved mount point.
+ *
+ * Bounded to ~5s so a missing FUSE / corrupt AppImage / permission error
+ * surfaces a clear error event instead of hanging the turn (spec AC). The
+ * mount child is detached from the abort signal here only to the extent of
+ * the timeout; the caller wires `signal` into the surrounding teardown.
+ */
+async function mountZcodeAppImage(
+  appImage: string,
+  opts: { cwd?: string; signal?: AbortSignal },
+): Promise<{ mountChild: ChildProcessWithoutNullStreams; mountPoint: string }> {
+  const mountChild = spawn(appImage, ["--appimage-mount"], {
+    cwd: opts.cwd ?? process.cwd(),
+    // All-pipe stdio keeps the type ChildProcessWithoutNullStreams (matching
+    // the app-server child). The mount child never reads stdin; an idle pipe
+    // is harmless and gets torn down with the child on teardown.
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const mountPoint = await new Promise<string>((resolve, reject) => {
+    let buf = "";
+    let settled = false;
+    const settle = (err: Error | null, value?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      mountChild.stdout.removeAllListeners();
+      mountChild.removeListener("error", onError);
+      mountChild.removeListener("close", onClose);
+      if (opts.signal && onSignalAbort) {
+        opts.signal.removeEventListener("abort", onSignalAbort);
+      }
+      if (err) {
+        try { mountChild.kill("SIGTERM"); } catch {}
+        reject(err);
+      } else {
+        resolve(value!);
+      }
+    };
+    const timer = setTimeout(() => {
+      settle(new Error("ZCode AppImage mount timed out (no mount point after 5s) — is FUSE available and the AppImage executable?"));
+    }, 5_000);
+    const onError = (err: Error) => settle(err);
+    // The mount child should stay alive holding the FUSE mount; ANY exit before
+    // a mount point is printed is a failure (FUSE missing, corrupt AppImage,
+    // permission denied, or killed). After success the idempotent guard no-ops.
+    const onClose = () =>
+      settle(new Error("ZCode AppImage mount exited before producing a mount point (FUSE missing, AppImage corrupt, or permission denied?)"));
+    // Honor an abort during the mount window (up to 5s). The outer onAbort is
+    // only registered AFTER this await resolves, so without this wiring a
+    // cancel during mount would hold the FUSE mount until the timeout fires.
+    const onSignalAbort = () => settle(new Error("ZCode AppImage mount aborted"));
+    mountChild.stdout.setEncoding("utf8");
+    mountChild.stdout.on("data", (chunk: string) => {
+      buf += chunk;
+      const nl = buf.indexOf("\n");
+      if (nl !== -1) {
+        const mp = buf.slice(0, nl).trim();
+        if (mp) settle(null, mp);
+        else settle(new Error("ZCode AppImage mount produced an empty mount point"));
+      }
+    });
+    mountChild.on("error", onError);
+    mountChild.on("close", onClose);
+    if (opts.signal?.aborted) {
+      settle(new Error("ZCode AppImage mount aborted"));
+    } else if (opts.signal) {
+      opts.signal.addEventListener("abort", onSignalAbort, { once: true });
+    }
+  });
+  return { mountChild, mountPoint };
+}
+
 function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): ReadableStream<InvokeEvent> {
   // ADR-0004 + #14 (live-probe-corrected): the app-server child self-authentic
   // ates the LOGIN from the user's logged-in state (a bare session/list returns
@@ -456,16 +532,17 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
   // binArgs carries the leading argv a node-script CLI needs (e.g.
   // [ZCODE_CJS_SENTINEL, "app-server"]). The prompt is NOT piped to stdin — it
   // travels inside the JSON-RPC session/send request. The sentinel on the
-  // AgentDef is filled here from resolveZcodeBin() so the spawn runs
-  // `node <real-cjs-path> app-server` (T7 — makes ZCode invocable end to end
-  // through the T6 invoke branch).
-  const argv = (def.binArgs ?? []).map((arg) =>
-    arg === ZCODE_CJS_SENTINEL ? (resolveZcodeBin() ?? arg) : arg,
-  );
+  // AgentDef is filled INSIDE start() (T7) from the resolved cjs path — on
+  // Linux that path is only known after the AppImage is self-mounted, so the
+  // argv cannot be built here (ADR-0007 decision 2).
 
   // Lifted above the ReadableStream so `cancel` (a sibling callback) can tear
-  // the turn + child down without waiting on `start`.
+  // the turn + children down without waiting on `start`.
   let child: ChildProcessWithoutNullStreams | null = null;
+  // ADR-0007: on Linux the AppImage mount child stays alive holding the FUSE
+  // mount for the duration of the turn; it is killed alongside `child` on
+  // teardown/cancel. Null on Windows/macOS (no mount).
+  let mountChild: ChildProcessWithoutNullStreams | null = null;
   let turnUnsubscribe: (() => void) | null = null;
   let client: ReturnType<typeof createZcodeProtocolClient> | null = null;
   // #22 / spec #20 N2: the silence-timer handle is lifted here (sibling to
@@ -503,6 +580,12 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       const killChild = () => {
         try {
           child?.kill("SIGTERM");
+        } catch {}
+        // ADR-0007: the mount child holds the FUSE mount alive; kill it so the
+        // mount unmounts at teardown (per-turn mount+unmount). No-op on
+        // Windows/macOS (mountChild is null there).
+        try {
+          mountChild?.kill("SIGTERM");
         } catch {}
       };
 
@@ -555,6 +638,54 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       // survives — not a replacement. Scoped to the app-server branch: other
       // agents must not inherit it. (ADR-0004 / T9.)
       const env = { ...envFor(opts.agent), ELECTRON_RUN_AS_NODE: "1" };
+
+      // ADR-0007: on Linux the `.cjs` lives inside the AppImage mount. Self-
+      // mount at turn start to expose it, then spawn
+      // `node <mountPoint>/resources/glm/zcode.cjs app-server`. The mount child
+      // is killed on teardown/cancel (per-turn mount+unmount, NOT a process-
+      // level cache — keeps the model stateless, matching Win/macOS). On
+      // Windows/macOS the `.cjs` is a permanent on-disk file; skip mounting.
+      let cjsPath: string;
+      if (process.platform === "linux") {
+        const appImage = resolveZcodeBin();
+        if (!appImage) {
+          safeEnqueue({
+            type: "error",
+            message:
+              "ZCode AppImage not found. Open the ZCode GUI once (to write its .desktop entry), set ZCODE_BIN, or put `zcode` on PATH.",
+          });
+          safeClose();
+          return;
+        }
+        try {
+          const mounted = await mountZcodeAppImage(appImage, {
+            cwd: opts.cwd,
+            signal: opts.signal,
+          });
+          mountChild = mounted.mountChild;
+          cjsPath = path.posix.join(
+            mounted.mountPoint,
+            "resources",
+            "glm",
+            "zcode.cjs",
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          try { mountChild?.kill("SIGTERM"); } catch {}
+          safeEnqueue({ type: "error", message });
+          safeClose();
+          return;
+        }
+      } else {
+        cjsPath = resolveZcodeBin() ?? ZCODE_CJS_SENTINEL;
+      }
+
+      // The sentinel on the AgentDef is filled here from the resolved cjs
+      // path so the spawn runs `node <real-cjs-path> app-server` (T7). On
+      // Linux the cjs path is the mounted path above (ADR-0007).
+      const argv = (def.binArgs ?? []).map((arg) =>
+        arg === ZCODE_CJS_SENTINEL ? cjsPath : arg,
+      );
 
       try {
         // Same Windows `.cmd`/`.bat` shim handling as the argv branch: quote
@@ -787,6 +918,11 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       client = null;
       try {
         child?.kill("SIGTERM");
+      } catch {}
+      // ADR-0007: kill the mount child on cancel too — it is a sibling of
+      // `child`, not reached by killChild() (which lives inside start()).
+      try {
+        mountChild?.kill("SIGTERM");
       } catch {}
     },
   });

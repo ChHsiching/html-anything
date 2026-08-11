@@ -650,6 +650,15 @@ describe("invokeAgent", () => {
       existsSyncDelegate.mockImplementation((p: string) => p === "/bin/sh");
     });
 
+    // ADR-0007: the Linux self-mount tests stub process.platform to "linux".
+    // Capture the real value once and restore after each test so platform-
+    // stubbing never leaks into sibling tests (the host here is win32).
+    const REAL_PLATFORM = process.platform;
+    afterEach(() => {
+      Object.defineProperty(process, "platform", { value: REAL_PLATFORM, configurable: true });
+      vi.useRealTimers();
+    });
+
     /**
      * Script the fake app-server child: auto-respond to each JSON-RPC request
      * method on stdin with a canned result on stdout. Records every request
@@ -715,6 +724,30 @@ describe("invokeAgent", () => {
       }) as typeof stdin.write;
 
       return { child, stdout, stderr, stdin, origWrite, sentMethods, sentFrames };
+    }
+
+    /**
+     * Script the fake AppImage mount child for ADR-0007 Linux self-mount tests.
+     * The real `AppImage --appimage-mount` prints the FUSE mount point to stdout
+     * (first line) and stays alive holding the mount. Here the mount point is
+     * written on a setTimeout(0) so the helper's stdout listener is attached
+     * before the data arrives (matching real async I/O). Pass `write: false` to
+     * simulate a mount that never produces a point (timeout / early-exit paths).
+     */
+    function makeMountChild(mountPoint: string, write = true) {
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdin = new Writable({ write(_c: unknown, _e: unknown, cb: () => void) { cb(); } });
+      const child = Object.assign(new EventEmitter(), {
+        stdin,
+        stdout,
+        stderr,
+        pid: 7777,
+      });
+      if (write) {
+        setTimeout(() => { stdout.write(`${mountPoint}\n`); }, 0);
+      }
+      return { child, stdout, stderr };
     }
 
     it("spawns via binArgs as `node <cjs> app-server` and reports start.argv", async () => {
@@ -1201,6 +1234,281 @@ describe("invokeAgent", () => {
       expect(create!.params).toMatchObject({
         model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" },
       });
+    });
+
+    // ─── ADR-0007: Linux AppImage self-mount ───────────────────────────────
+    //
+    // On Linux ZCode ships as an AppImage with zcode.cjs packed inside,
+    // reachable only while mounted. The adapter self-mounts at turn start
+    // (`AppImage --appimage-mount`), spawns `node <mountPoint>/resources/glm/
+    // zcode.cjs app-server`, and kills the mount child on teardown/cancel. The
+    // spawn mock returns a fake mount child for the first call (argv includes
+    // "--appimage-mount") and a fake app-server child for the second.
+    const mountCjs = (mp: string) => `${mp}/resources/glm/zcode.cjs`;
+    const flushMicrotasks = async (iterations = 200) => {
+      for (let i = 0; i < iterations; i++) {
+        await Promise.resolve();
+        await new Promise((r) => process.nextTick(r));
+      }
+    };
+
+    it("(ADR-0007) mounts the AppImage before spawning app-server; cjs argv is the mount-point path", async () => {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      const mountPoint = "/tmp/.mount_ZCode-xxxx";
+      const mount = makeMountChild(mountPoint);
+      const app = makeAppServerChild();
+      mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
+        argv.includes("--appimage-mount") ? mount.child : app.child,
+      );
+      // On Linux resolveZcodeBin() returns the AppImage (ZCODE_BIN here).
+      vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/opt/ZCode.AppImage" ||
+        p === "/resolved/node" ||
+        p === "/bin/sh",
+      );
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "build it",
+        binOverride: "/resolved/node",
+      });
+
+      // Let the mount resolve (setTimeout(0) write + microtasks + app-server spawn).
+      await new Promise((r) => setTimeout(r, 50));
+      const eventsPromise = collectStream(stream);
+
+      app.stdout.write(
+        `${JSON.stringify({
+          method: "session/event",
+          params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+        })}\n`,
+      );
+      app.stdout.end();
+      await new Promise((r) => setImmediate(r));
+      app.child.emit("close", 0);
+      await eventsPromise;
+
+      // Two spawns: mount first, app-server second.
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      const [mountCall, appCall] = mockSpawn.mock.calls as unknown as [string, string[]][];
+      expect(mountCall[0]).toBe("/opt/ZCode.AppImage");
+      expect(mountCall[1]).toEqual(["--appimage-mount"]);
+      expect(appCall[0]).toBe("/resolved/node");
+      expect(appCall[1]).toEqual([mountCjs(mountPoint), "app-server"]);
+    });
+
+    it("(ADR-0007) reports the mount-point cjs path in the start event argv", async () => {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      const mountPoint = "/tmp/.mount_ZCode-yyyy";
+      const mount = makeMountChild(mountPoint);
+      const app = makeAppServerChild();
+      mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
+        argv.includes("--appimage-mount") ? mount.child : app.child,
+      );
+      vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/opt/ZCode.AppImage" ||
+        p === "/resolved/node" ||
+        p === "/bin/sh",
+      );
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "p",
+        binOverride: "/resolved/node",
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const eventsPromise = collectStream(stream);
+      app.stdout.write(
+        `${JSON.stringify({
+          method: "session/event",
+          params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+        })}\n`,
+      );
+      app.stdout.end();
+      await new Promise((r) => setImmediate(r));
+      app.child.emit("close", 0);
+
+      const events = await eventsPromise;
+      const startEv = events.find((e) => e.type === "start");
+      expect(startEv).toMatchObject({
+        type: "start",
+        bin: "/resolved/node",
+        argv: [mountCjs(mountPoint), "app-server"],
+      });
+    });
+
+    it("(ADR-0007) kills the mount child when the app-server child dies mid-turn", async () => {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      const mount = makeMountChild("/tmp/.mount_ZCode-zzz");
+      const mountKillSpy = vi.fn();
+      (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
+      const app = makeAppServerChild();
+      mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
+        argv.includes("--appimage-mount") ? mount.child : app.child,
+      );
+      vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/opt/ZCode.AppImage" ||
+        p === "/resolved/node" ||
+        p === "/bin/sh",
+      );
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "p",
+        binOverride: "/resolved/node",
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const eventsPromise = collectStream(stream);
+
+      // App-server child dies before any terminal event → teardown.
+      app.child.emit("close", 1);
+      await eventsPromise;
+
+      expect(mountKillSpy).toHaveBeenCalled();
+    });
+
+    it("(ADR-0007) kills the mount child when the stream consumer cancels", async () => {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      const mount = makeMountChild("/tmp/.mount_ZCode-cancel");
+      const mountKillSpy = vi.fn();
+      (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
+      const app = makeAppServerChild();
+      mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
+        argv.includes("--appimage-mount") ? mount.child : app.child,
+      );
+      vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/opt/ZCode.AppImage" ||
+        p === "/resolved/node" ||
+        p === "/bin/sh",
+      );
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "p",
+        binOverride: "/resolved/node",
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      await stream.cancel();
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(mountKillSpy).toHaveBeenCalled();
+    });
+
+    it("(ADR-0007) emits a clear error and never spawns app-server when the mount child exits non-zero", async () => {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      const mount = makeMountChild("/never/printed", false);
+      const mountKillSpy = vi.fn();
+      (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
+      const app = makeAppServerChild();
+      mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
+        argv.includes("--appimage-mount") ? mount.child : app.child,
+      );
+      vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/opt/ZCode.AppImage" ||
+        p === "/resolved/node" ||
+        p === "/bin/sh",
+      );
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "p",
+        binOverride: "/resolved/node",
+      });
+
+      await new Promise((r) => setTimeout(r, 10));
+      // Mount child exits with an error before printing a mount point.
+      mount.child.emit("close", 1);
+      await new Promise((r) => setTimeout(r, 10));
+
+      const events = await collectStream(stream);
+      const errors = events.filter((e) => e.type === "error");
+      expect(errors.length).toBeGreaterThanOrEqual(1);
+      expect((errors[0] as { message?: string }).message).toMatch(/mount/i);
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mountKillSpy).toHaveBeenCalled();
+    });
+
+    it("(ADR-0007) fires a clear error after the 5s mount timeout and cleans up the mount child", async () => {
+      vi.useFakeTimers();
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      const mount = makeMountChild("/never/printed", false);
+      const mountKillSpy = vi.fn();
+      (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
+      const app = makeAppServerChild();
+      mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
+        argv.includes("--appimage-mount") ? mount.child : app.child,
+      );
+      vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/opt/ZCode.AppImage" ||
+        p === "/resolved/node" ||
+        p === "/bin/sh",
+      );
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "p",
+        binOverride: "/resolved/node",
+      });
+
+      await flushMicrotasks();
+      vi.advanceTimersByTime(5_500);
+      await flushMicrotasks();
+
+      const events = await collectStream(stream);
+      const errors = events.filter((e) => e.type === "error");
+      expect(errors.length).toBeGreaterThanOrEqual(1);
+      expect((errors[0] as { message?: string }).message).toMatch(/mount timed out/i);
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mountKillSpy).toHaveBeenCalled();
+    });
+
+    // (7) An abort during the mount window (before the outer onAbort is
+    // registered) is honored by the signal wired into mountZcodeAppImage: the
+    // mount child is killed and a clear error surfaces, without waiting for the
+    // 5s timeout.
+    it("(ADR-0007) honors an abort during the mount window (signal wired into the mount helper)", async () => {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      const mount = makeMountChild("/never/printed", false);
+      const mountKillSpy = vi.fn();
+      (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
+      const app = makeAppServerChild();
+      mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
+        argv.includes("--appimage-mount") ? mount.child : app.child,
+      );
+      vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
+      existsSyncDelegate.mockImplementation((p: string) =>
+        p === "/opt/ZCode.AppImage" ||
+        p === "/resolved/node" ||
+        p === "/bin/sh",
+      );
+
+      const controller = new AbortController();
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "p",
+        binOverride: "/resolved/node",
+        signal: controller.signal,
+      });
+
+      // Abort during the mount window (mount child never prints a point).
+      await new Promise((r) => setTimeout(r, 10));
+      controller.abort();
+      await new Promise((r) => setTimeout(r, 10));
+
+      const events = await collectStream(stream);
+      const errors = events.filter((e) => e.type === "error");
+      expect(errors.length).toBeGreaterThanOrEqual(1);
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mountKillSpy).toHaveBeenCalled();
     });
   });
 });

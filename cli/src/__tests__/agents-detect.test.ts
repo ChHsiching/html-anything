@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
-const { existsSyncMock, pickerModels, pickerDefault } = vi.hoisted(() => ({
+const { existsSyncMock, readFileSyncMock, pickerModels, pickerDefault } = vi.hoisted(() => ({
   existsSyncMock: vi.fn((_path?: string) => false),
+  // ADR-0007: discoverZcodeAppImage reads the XDG .desktop entry. Mocked so
+  // the discover tests don't touch disk; the pure parser (parseZcodeDesktopExec)
+  // is exercised separately with string fixtures.
+  readFileSyncMock: vi.fn((_path?: string, _enc?: string) => ""),
   // #19: the dynamic ZCode picker models returned by readZcodeModelPicker.
   // Mirrors a live config with TWO enabled providers (one with 2 models, one
   // with 1) + disabled providers filtered out upstream by the reader.
@@ -17,7 +21,7 @@ const { existsSyncMock, pickerModels, pickerDefault } = vi.hoisted(() => ({
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
-  return { ...actual, existsSync: existsSyncMock };
+  return { ...actual, existsSync: existsSyncMock, readFileSync: readFileSyncMock };
 });
 
 // #19 / ADR-0005 decision 4: detect reads the ZCode picker models from
@@ -28,7 +32,7 @@ vi.mock("@html-anything/zcode-protocol/zcode-model-picker", () => ({
   readZcodeModelPicker: () => ({ models: pickerModels, defaultProviderId: "builtin:bigmodel-coding-plan", defaultModelId: pickerDefault }),
 }));
 
-import { detectAgents, resolveZcodeBin, resolveZcodeNodeBin, defaultZcodeElectronExePaths, AGENTS, DEFAULT_MODEL, type AgentDef, type AgentProtocol } from "../agents-detect.js";
+import { detectAgents, resolveZcodeBin, resolveZcodeNodeBin, defaultZcodeElectronExePaths, defaultZcodeCjsPaths, discoverZcodeAppImage, parseZcodeDesktopExec, AGENTS, DEFAULT_MODEL, type AgentDef, type AgentProtocol } from "../agents-detect.js";
 
 function findAgent(
   agents: ReturnType<typeof detectAgents>,
@@ -42,6 +46,8 @@ function findAgent(
 beforeEach(() => {
   existsSyncMock.mockReset();
   existsSyncMock.mockReturnValue(false);
+  readFileSyncMock.mockReset();
+  readFileSyncMock.mockReturnValue("");
 });
 
 // Real value captured once at module load; restore after each platform-stubbing
@@ -491,12 +497,16 @@ describe("detectAgents", () => {
       );
     });
 
-    it("Linux: probes ~/Applications/ZCode.AppImage", () => {
+    // ADR-0007: on Linux the canonical AppImage guess is NO LONGER probed —
+    // discovery goes through the .desktop entry (resolveZcodeBin step 3 calls
+    // discoverZcodeAppImage). Without a .desktop, resolveZcodeBin returns null
+    // (no silent fallback to ~/Applications/ZCode.AppImage). The positive case
+    // (.desktop present → AppImage found) is covered in the ADR-0007 block below.
+    it("Linux: returns null without a .desktop entry (no canonical-path guess)", () => {
       stubPlatform("linux");
-      const expected = `${homedir()}/Applications/ZCode.AppImage`;
-      existsSyncMock.mockImplementation((p) => p === expected);
+      existsSyncMock.mockReturnValue(false);
 
-      expect(resolveZcodeBin()).toBe(expected);
+      expect(resolveZcodeBin()).toBeNull();
     });
 
     it("Linux: `zcode` on PATH is found before the AppImage default", () => {
@@ -763,5 +773,178 @@ describe("detectAgents", () => {
       expect(zcode.available).toBe(false);
       expect(zcode.models).toEqual([DEFAULT_MODEL]);
     });
+  });
+});
+
+// ADR-0007: on Linux ZCode ships as an AppImage — a single compressed file
+// with zcode.cjs packed inside, unreachable without mounting. The adapter
+// discovers the AppImage via the XDG .desktop entry ZCode writes on first GUI
+// launch, NOT by guessing a version-less filename. The pure parser
+// (parseZcodeDesktopExec) carries the parsing+validation logic; the discover
+// function is a thin I/O glue over it. resolveZcodeBin / resolveZcodeNodeBin
+// wire the discovery into the existing probe chain (step 3 on Linux).
+describe("parseZcodeDesktopExec — .desktop Exec= parsing + validation (ADR-0007)", () => {
+  it("extracts the AppImage path from a well-formed Exec= line", () => {
+    const desktop = [
+      "[Desktop Entry]",
+      "Name=ZCode",
+      "Exec=/home/user/Applications/ZCode-3.7.5-linux-x64.AppImage --no-sandbox %U",
+      "Icon=zcode",
+      "Type=Application",
+    ].join("\n");
+    expect(parseZcodeDesktopExec(desktop)).toBe(
+      "/home/user/Applications/ZCode-3.7.5-linux-x64.AppImage",
+    );
+  });
+
+  it("strips surrounding quotes a launcher might write", () => {
+    const desktop = `[Desktop Entry]\nExec="/opt/ZCode.AppImage" %U\n`;
+    expect(parseZcodeDesktopExec(desktop)).toBe("/opt/ZCode.AppImage");
+  });
+
+  it("preserves a quoted path that contains spaces (no truncation)", () => {
+    // A path with an interior space MUST be quoted per the freedesktop spec;
+    // splitting on whitespace first would truncate it at the space. This is
+    // the regression guard for the quote-aware tokenizer.
+    const desktop = `[Desktop Entry]\nExec="/home/user/My Apps/ZCode-3.7.5.AppImage" --no-sandbox %U\n`;
+    expect(parseZcodeDesktopExec(desktop)).toBe(
+      "/home/user/My Apps/ZCode-3.7.5.AppImage",
+    );
+  });
+
+  it("returns null when no Exec= line is present", () => {
+    const desktop = `[Desktop Entry]\nName=ZCode\nIcon=zcode\n`;
+    expect(parseZcodeDesktopExec(desktop)).toBeNull();
+  });
+
+  it("does not match TryExec= (a different field)", () => {
+    const desktop = `[Desktop Entry]\nTryExec=/opt/ZCode.AppImage\nExec=/real/ZCode.AppImage\n`;
+    expect(parseZcodeDesktopExec(desktop)).toBe("/real/ZCode.AppImage");
+  });
+
+  it("returns null for a malformed Exec= that is just a field code", () => {
+    const desktop = `[Desktop Entry]\nExec=%U\n`;
+    expect(parseZcodeDesktopExec(desktop)).toBeNull();
+  });
+
+  it("returns null for an empty Exec= value", () => {
+    const desktop = `[Desktop Entry]\nExec=\n`;
+    expect(parseZcodeDesktopExec(desktop)).toBeNull();
+  });
+
+  it("returns null for empty content", () => {
+    expect(parseZcodeDesktopExec("")).toBeNull();
+  });
+});
+
+describe("discoverZcodeAppImage — .desktop I/O glue (ADR-0007)", () => {
+  const desktopPath = posix.join(
+    homedir(),
+    ".local",
+    "share",
+    "applications",
+    "zcode.desktop",
+  );
+
+  it("reads the .desktop entry and returns the parsed AppImage path", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation((p) => p === desktopPath);
+    readFileSyncMock.mockReturnValue(
+      "[Desktop Entry]\nExec=/opt/ZCode-3.7.5.AppImage --no-sandbox\n",
+    );
+
+    expect(discoverZcodeAppImage()).toBe("/opt/ZCode-3.7.5.AppImage");
+    expect(readFileSyncMock).toHaveBeenCalledWith(desktopPath, "utf8");
+  });
+
+  it("returns null when the .desktop file is missing", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockReturnValue(false);
+
+    expect(discoverZcodeAppImage()).toBeNull();
+    expect(readFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("returns null (never throws) when readFileSync throws (e.g. EACCES)", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation((p) => p === desktopPath);
+    readFileSyncMock.mockImplementation(() => {
+      throw new Error("EACCES: permission denied");
+    });
+
+    expect(discoverZcodeAppImage()).toBeNull();
+  });
+
+  it("returns null when the Exec= line is malformed", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation((p) => p === desktopPath);
+    readFileSyncMock.mockReturnValue("[Desktop Entry]\nName=ZCode\n");
+
+    expect(discoverZcodeAppImage()).toBeNull();
+  });
+});
+
+// ADR-0007 decision 1: on Linux, resolveZcodeBin() step 3 discovers the
+// AppImage via the .desktop entry. The returned path is the AppImage binary,
+// NOT a .cjs — the .cjs lives inside the mount and is resolved post-mount in
+// the invoke layer.
+describe("resolveZcodeBin / resolveZcodeNodeBin on Linux (ADR-0007)", () => {
+  const desktopPath = posix.join(
+    homedir(),
+    ".local",
+    "share",
+    "applications",
+    "zcode.desktop",
+  );
+
+  it("resolveZcodeBin() step 3 returns the .desktop AppImage when no env/PATH hit", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation(
+      (p) => p === desktopPath || p === "/opt/ZCode.AppImage",
+    );
+    readFileSyncMock.mockReturnValue(
+      "[Desktop Entry]\nExec=/opt/ZCode.AppImage\n",
+    );
+
+    expect(resolveZcodeBin()).toBe("/opt/ZCode.AppImage");
+  });
+
+  it("resolveZcodeNodeBin() step 3 returns the discovered AppImage (Electron driver)", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation(
+      (p) => p === desktopPath || p === "/opt/ZCode.AppImage",
+    );
+    readFileSyncMock.mockReturnValue(
+      "[Desktop Entry]\nExec=/opt/ZCode.AppImage\n",
+    );
+
+    expect(resolveZcodeNodeBin()).toBe("/opt/ZCode.AppImage");
+  });
+
+  it("resolveZcodeNodeBin() terminal fallback is the canonical guess when discovery misses", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockReturnValue(false);
+
+    expect(resolveZcodeNodeBin()).toBe(
+      posix.join(homedir(), "Applications", "ZCode.AppImage"),
+    );
+  });
+
+  it("defaultZcodeCjsPaths() returns [] on Linux (the .cjs lives inside the mount)", () => {
+    stubPlatform("linux");
+    expect(defaultZcodeCjsPaths()).toEqual([]);
+  });
+
+  it("defaultZcodeCjsPaths() Windows/macOS branches are unchanged", () => {
+    stubPlatform("win32");
+    vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "D:\\ZCode");
+    expect(defaultZcodeCjsPaths()).toEqual([
+      "D:\\ZCode\\resources\\glm\\zcode.cjs",
+      "C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs",
+    ]);
+    stubPlatform("darwin");
+    expect(defaultZcodeCjsPaths()).toEqual([
+      "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+    ]);
   });
 });
