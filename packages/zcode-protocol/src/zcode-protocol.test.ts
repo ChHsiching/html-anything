@@ -215,6 +215,35 @@ describe("createZcodeProtocolClient — request timeout & abort", () => {
     await expect(pending).rejects.toThrow(/Timed out/);
   });
 
+  it("releases the AbortSignal listener when the request times out", async () => {
+    const child = makeChild();
+    const client = createZcodeProtocolClient(child);
+    const controller = new AbortController();
+    const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+    const pending = client.request(
+      { id: "t2", method: "workspace/ping", params: {} },
+      5_000,
+      controller.signal,
+    );
+    // Attach a catch up front so the timeout rejection is never briefly
+    // unhandled (mirrors the sibling "rejects after timeoutMs" test above).
+    pending.catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pending).rejects.toThrow(/Timed out/);
+
+    // The timeout path must run cleanup(), detaching the abort listener so a
+    // long-lived AbortController does not accumulate listeners across
+    // timed-out RPCs.
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+
+    // A late abort is a silent no-op: it must not throw or double-reject the
+    // already-timed-out promise.
+    expect(() => controller.abort(new Error("too late"))).not.toThrow();
+    await expect(pending).rejects.toThrow(/Timed out/);
+  });
+
   it("rejects immediately when given an already-aborted signal", async () => {
     const child = makeChild();
     const client = createZcodeProtocolClient(child);

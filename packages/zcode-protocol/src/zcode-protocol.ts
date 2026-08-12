@@ -246,6 +246,7 @@ export function createZcodeProtocolClient(child: ChildProcess): ZcodeProtocolCli
 
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
+          cleanup();
           pending.delete(request.id);
           reject(
             new Error(`Timed out waiting for zcode app-server response. stderr: ${stderrTail}`),
