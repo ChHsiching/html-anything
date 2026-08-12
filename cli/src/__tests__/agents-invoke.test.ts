@@ -2,10 +2,14 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 
-const { mockSpawn, existsSyncDelegate, mockReadZcodeConfig, mockReadZcodeModelPicker } = vi.hoisted(() => ({
-  mockSpawn: vi.fn(),
-  existsSyncDelegate: vi.fn((p: string) => p === "/bin/sh"),
-  mockReadZcodeConfig: vi.fn((): unknown => ({
+const { mockSpawn, existsSyncDelegate, mockReadZcodeConfig, mockReadZcodeConfigForProvider, mockReadZcodeModelPicker } = vi.hoisted(() => {
+  // #14 / #26: the saved provider config the workspace-default relay upserts.
+  // Shared by readZcodeConfig (the fallback) and readZcodeConfigForProvider
+  // (the GUI-default path in resolveWorkspaceModelConfig) so the relay succeeds
+  // without touching disk — the config reader is tested in the protocol pkg.
+  // A per-test "no usable provider" case must null BOTH mocks: resolveWorkspaceModelConfig
+  // tries the GUI provider first and only falls back to readZcodeConfig if that is null.
+  const defaultProviderConfig = {
     provider: "builtin:bigmodel-coding-plan",
     model: "GLM-5.2",
     models: ["GLM-5.2"],
@@ -16,21 +20,27 @@ const { mockSpawn, existsSyncDelegate, mockReadZcodeConfig, mockReadZcodeModelPi
       models: [{ modelId: "GLM-5.2" }],
       baseURL: "https://open.bigmodel.cn/api/anthropic",
     },
-  })),
-  // #19: the dynamic ZCode picker models returned by readZcodeModelPicker.
-  // Two enabled providers' models; the resolver picks the entry whose id
-  // matches opts.model. defaultProviderId is the selected provider, so the
-  // disambiguation test (model under two providers) resolves correctly.
-  mockReadZcodeModelPicker: vi.fn((): unknown => ({
-    models: [
-      { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
-      { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
-      { id: "anthropic/claude-sonnet-4.5", label: "anthropic/claude-sonnet-4.5", providerId: "builtin:openrouter" },
-    ],
-    defaultProviderId: "builtin:bigmodel-coding-plan",
-    defaultModelId: "GLM-5.2",
-  })),
-}));
+  };
+  return {
+    mockSpawn: vi.fn(),
+    existsSyncDelegate: vi.fn((p: string) => p === "/bin/sh"),
+    mockReadZcodeConfig: vi.fn((): unknown => defaultProviderConfig),
+    mockReadZcodeConfigForProvider: vi.fn((): unknown => defaultProviderConfig),
+    // #19: the dynamic ZCode picker models returned by readZcodeModelPicker.
+    // Two enabled providers' models; the resolver picks the entry whose id
+    // matches opts.model. defaultProviderId is the selected provider, so the
+    // disambiguation test (model under two providers) resolves correctly.
+    mockReadZcodeModelPicker: vi.fn((): unknown => ({
+      models: [
+        { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
+        { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
+        { id: "anthropic/claude-sonnet-4.5", label: "anthropic/claude-sonnet-4.5", providerId: "builtin:openrouter" },
+      ],
+      defaultProviderId: "builtin:bigmodel-coding-plan",
+      defaultModelId: "GLM-5.2",
+    })),
+  };
+});
 
 vi.mock("node:child_process", () => ({
   spawn: mockSpawn,
@@ -43,9 +53,12 @@ vi.mock("node:fs", async () => {
 
 // #14: ensureWorkspaceModel reads the saved provider config. Mock it so the
 // invoke-layer tests don't touch disk; the config reader itself is tested in
-// the protocol package.
+// the protocol package. #26: resolveWorkspaceModelConfig also calls
+// readZcodeConfigForProvider (the GUI-default path) — mock it too, or the relay
+// throws on the undefined export and every app-server turn fails.
 vi.mock("@html-anything/zcode-protocol/zcode-config", () => ({
   readZcodeConfig: mockReadZcodeConfig,
+  readZcodeConfigForProvider: mockReadZcodeConfigForProvider,
 }));
 
 // #19: resolveZcodeTurnModel reads the dynamic picker models. Mock it so the
@@ -1043,6 +1056,11 @@ describe("invokeAgent", () => {
     });
 
     it("emits {type:'error'} and does not create when no usable provider is configured", async () => {
+      // #26: resolveWorkspaceModelConfig tries the GUI-default provider first
+      // (readZcodeConfigForProvider) and only falls back to readZcodeConfig if
+      // that is null — so the no-usable-provider case must null BOTH, or the
+      // GUI path would rescue the turn and no error would fire.
+      mockReadZcodeConfigForProvider.mockReturnValueOnce(null);
       mockReadZcodeConfig.mockReturnValueOnce(null);
       const { child } = makeAppServerChild();
       mockSpawn.mockReturnValue(child);
