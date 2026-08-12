@@ -1,9 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ZcodeProtocolClientLike } from "./zcode-session";
 import { startZcodeProtocolTurn, ensureWorkspaceModel } from "./zcode-session";
+import type { ZcodeConfig } from "./zcode-config";
 
-// Mock the config reader so tests don't touch disk. The relay's job is to
-// send the right frames; the config reader is tested separately.
+// Mock the config + picker readers so tests don't touch disk. The relay's job
+// is to send the right frames; the readers are tested separately. By default
+// the GUI default is absent (defaultProviderId: null) and readZcodeConfigForProvider
+// yields null, so the relay falls back to the first-usable readZcodeConfig mock —
+// the pre-#26 path the existing assertions pin. Per-test spies override these.
 vi.mock("./zcode-config.js", () => ({
   readZcodeConfig: () => ({
     provider: "builtin:bigmodel-coding-plan",
@@ -16,6 +20,14 @@ vi.mock("./zcode-config.js", () => ({
       models: [{ modelId: "GLM-5.2" }, { modelId: "GLM-5-Turbo" }],
       baseURL: "https://open.bigmodel.cn/api/anthropic",
     },
+  }),
+  readZcodeConfigForProvider: () => null,
+}));
+vi.mock("./zcode-model-picker.js", () => ({
+  readZcodeModelPicker: () => ({
+    models: [],
+    defaultProviderId: null,
+    defaultModelId: null,
   }),
 }));
 
@@ -78,6 +90,12 @@ function makeFakeClient(
 describe("ensureWorkspaceModel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+  // Restore spy implementations between tests so a per-test
+  // vi.spyOn(...).mockReturnValue(...) cannot leak into a later test (the
+  // module-level vi.mock factories above remain in effect).
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("sends upsert → setDefault with the live-confirmed workspace + provider + model shapes", async () => {
@@ -155,6 +173,111 @@ describe("ensureWorkspaceModel", () => {
     ).rejects.toThrow(/no usable ZCode provider.*config\.json.*GUI/i);
     // And it must NOT have sent any frames.
     expect(client.requests).toEqual([]);
+  });
+
+  it("prefers the GUI-selected provider when it resolves to a usable provider (ADR-0010)", async () => {
+    // The picker resolves the GUI default to openrouter; readZcodeConfigForProvider
+    // returns its (usable) selection. The relay MUST use it and NOT consult the
+    // first-usable fallback (readZcodeConfig).
+    const openrouterConfig: ZcodeConfig = {
+      provider: "builtin:openrouter",
+      model: "anthropic/claude-sonnet-4.5",
+      models: ["anthropic/claude-sonnet-4.5"],
+      providerRecord: {
+        providerId: "builtin:openrouter",
+        kind: "openai-compatible",
+        apiKey: { source: "inline", value: "or-key" },
+        models: [{ modelId: "anthropic/claude-sonnet-4.5" }],
+        baseURL: "https://openrouter.ai/api/v1",
+      },
+    };
+    const picker = await import("./zcode-model-picker.js");
+    vi.spyOn(picker, "readZcodeModelPicker").mockReturnValue({
+      models: [],
+      defaultProviderId: "builtin:openrouter",
+      defaultModelId: "anthropic/claude-sonnet-4.5",
+    });
+    const zcodeConfig = await import("./zcode-config.js");
+    const forProviderSpy = vi
+      .spyOn(zcodeConfig, "readZcodeConfigForProvider")
+      .mockReturnValue(openrouterConfig);
+    // Sentinel: if the relay wrongly fell through, it would hit this and bind
+    // the wrong provider — so a regression is caught twice (call + result).
+    const firstUsableSpy = vi
+      .spyOn(zcodeConfig, "readZcodeConfig")
+      .mockReturnValue({ provider: "SHOULD-NOT-BE-USED" } as unknown as ZcodeConfig);
+
+    const client = makeFakeClient({
+      "workspace/upsertModelProvider": { ok: true },
+      "workspace/setDefaultModel": { ok: true },
+    });
+    const result = await ensureWorkspaceModel({ client, cwd: "/p" });
+
+    expect(forProviderSpy).toHaveBeenCalledWith("builtin:openrouter");
+    expect(firstUsableSpy).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      providerId: "builtin:openrouter",
+      modelId: "anthropic/claude-sonnet-4.5",
+    });
+    // upsert carries the GUI-default provider's record, not the first-usable one.
+    expect(
+      (client.requests[0]!.params.provider as Record<string, unknown>).providerId,
+    ).toBe("builtin:openrouter");
+    expect((client.requests[1]!.params.model as Record<string, unknown>)).toEqual({
+      providerId: "builtin:openrouter",
+      modelId: "anthropic/claude-sonnet-4.5",
+    });
+  });
+
+  it("falls back to the first usable entry when the GUI default is unusable/absent", async () => {
+    // GUI default points at an entitlement-expired provider; readZcodeConfigForProvider
+    // returns null (unusable), so the relay falls back to readZcodeConfig (the
+    // first-usable entry = the coding-plan factory mock).
+    const picker = await import("./zcode-model-picker.js");
+    vi.spyOn(picker, "readZcodeModelPicker").mockReturnValue({
+      models: [],
+      defaultProviderId: "builtin:lapsed",
+      defaultModelId: null,
+    });
+    const zcodeConfig = await import("./zcode-config.js");
+    const forProviderSpy = vi
+      .spyOn(zcodeConfig, "readZcodeConfigForProvider")
+      .mockReturnValue(null);
+    // readZcodeConfig is left at the factory mock (coding-plan).
+
+    const client = makeFakeClient({
+      "workspace/upsertModelProvider": { ok: true },
+      "workspace/setDefaultModel": { ok: true },
+    });
+    const result = await ensureWorkspaceModel({ client, cwd: "/p" });
+
+    expect(forProviderSpy).toHaveBeenCalledWith("builtin:lapsed");
+    expect(result).toEqual({
+      providerId: "builtin:bigmodel-coding-plan",
+      modelId: "GLM-5.2",
+    });
+    expect(
+      (client.requests[0]!.params.provider as Record<string, unknown>).providerId,
+    ).toBe("builtin:bigmodel-coding-plan");
+  });
+
+  it("falls back to the first usable entry when the GUI default is absent (null)", async () => {
+    // defaultProviderId null (factory default) → readZcodeConfigForProvider is
+    // never consulted; the first-usable readZcodeConfig path applies.
+    const zcodeConfig = await import("./zcode-config.js");
+    const forProviderSpy = vi.spyOn(zcodeConfig, "readZcodeConfigForProvider");
+
+    const client = makeFakeClient({
+      "workspace/upsertModelProvider": { ok: true },
+      "workspace/setDefaultModel": { ok: true },
+    });
+    const result = await ensureWorkspaceModel({ client, cwd: "/p" });
+
+    expect(forProviderSpy).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      providerId: "builtin:bigmodel-coding-plan",
+      modelId: "GLM-5.2",
+    });
   });
 });
 

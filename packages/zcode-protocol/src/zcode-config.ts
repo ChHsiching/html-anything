@@ -95,6 +95,12 @@ export interface ZcodeConfig {
 interface RawProviderEntry {
   kind?: unknown;
   enabled?: unknown;
+  /**
+   * The GUI sets this on expired/inactive entitlements (e.g. a Coding Plan the
+   * user is no longer entitled to, or an OAuth provider whose session lapsed).
+   * A non-empty value disqualifies the entry — see {@link isUsableZcodeProvider}.
+   */
+  systemDisabledReason?: unknown;
   options?: unknown;
   models?: unknown;
 }
@@ -123,26 +129,59 @@ function coerceKind(kind: unknown): ZcodeProviderKind | null {
 }
 
 /**
+ * The ONE shared definition of "usable provider" (ADR-0010 Decision 2): an
+ * entry is usable when it is `enabled`, carries NO non-empty
+ * `systemDisabledReason`, has a recognized `kind`, AND a non-empty
+ * `options.apiKey`.
+ *
+ * Called by BOTH the relay reader ({@link parseProviderEntry}) and the picker
+ * (zcode-model-picker.ts), so the two cannot drift again. They had drifted:
+ * the picker checked `systemDisabledReason` while the relay did not, so the
+ * relay could bind an entitlement-expired provider (`enabled` + leftover
+ * `apiKey` + `systemDisabledReason`) whose models the picker hid — i.e. a
+ * provider `session/create` then could not actually serve. The relay's extra
+ * "≥1 model" requirement (needed to build the upsert record) is NOT part of
+ * this predicate; it stays in {@link parseProviderEntry} because the picker has
+ * no such need.
+ */
+export function isUsableZcodeProvider(raw: unknown): boolean {
+  if (!isRecord(raw)) return false;
+  const entry = raw as RawProviderEntry;
+  if (entry.enabled !== true) return false;
+  if (
+    typeof entry.systemDisabledReason === "string" &&
+    entry.systemDisabledReason.length > 0
+  ) {
+    return false;
+  }
+  if (!coerceKind(entry.kind)) return false;
+  const options = isRecord(entry.options) ? (entry.options as RawProviderOptions) : null;
+  const apiKey = options && typeof options.apiKey === "string" ? options.apiKey : "";
+  return apiKey.length > 0;
+}
+
+/**
  * Validate one raw provider entry; return the canonical selection or `null`.
  *
- * An entry is usable when it is `enabled`, has an `options.apiKey` non-empty
- * string, has a `models` map with at least one model id, and carries a
- * recognized `kind`. Coding Plan and first-party BigModel entries both qualify
- * (the GUI writes the resolved key into `options.apiKey` for both).
+ * Gates on the shared {@link isUsableZcodeProvider} predicate (enabled, no
+ * `systemDisabledReason`, recognized kind, non-empty apiKey — ADR-0010), then
+ * applies the relay's additional "≥1 model" requirement to build the upsert
+ * record. Coding Plan and first-party BigModel entries both qualify (the GUI
+ * writes the resolved key into `options.apiKey` for both).
  */
 function parseProviderEntry(
   providerId: string,
   raw: RawProviderEntry,
 ): ZcodeConfig | null {
-  if (raw.enabled !== true) return null;
+  if (!isUsableZcodeProvider(raw)) return null;
+
+  const kind = coerceKind(raw.kind);
+  // Guaranteed non-null by isUsableZcodeProvider; guard keeps the type narrow.
+  if (!kind) return null;
 
   const options = isRecord(raw.options) ? (raw.options as RawProviderOptions) : null;
   const apiKey =
     options && typeof options.apiKey === "string" ? options.apiKey : "";
-  if (apiKey.length === 0) return null;
-
-  const kind = coerceKind(raw.kind);
-  if (!kind) return null;
 
   // `models` is a MAP keyed by model id in config.json (unlike the array shape
   // in the template model-providers.json). Pull the keys as model ids.
@@ -197,6 +236,51 @@ export function parseZcodeConfig(data: unknown): ZcodeConfig | null {
 }
 
 /**
+ * Parse an already-decoded `config.json` and return the canonical selection
+ * for a SPECIFIC provider id — the GUI-selected default
+ * (`~/.zcode/v2/setting.json`'s `modelProviderFamilySelectedKeys`, which the
+ * picker resolves as `defaultProviderId`).
+ *
+ * Returns `null` when the id is absent, the entry is not a usable provider
+ * (fails {@link isUsableZcodeProvider}), or has no models — so the caller
+ * ({@link ensureWorkspaceModel}) can fall back to the first usable entry
+ * ({@link parseZcodeConfig}) when the GUI default is unusable/absent. Unlike
+ * {@link parseZcodeConfig}, this NEVER falls through to another provider: it
+ * targets exactly the requested id, or nothing. Tolerant: never throws.
+ */
+export function parseZcodeConfigForProvider(
+  data: unknown,
+  providerId: string,
+): ZcodeConfig | null {
+  if (typeof providerId !== "string" || providerId.length === 0) return null;
+  if (!isRecord(data)) return null;
+  const providers = isRecord(data.provider) ? data.provider : null;
+  if (!providers) return null;
+  const entry = (providers as Record<string, unknown>)[providerId];
+  if (!isRecord(entry)) return null;
+  return parseProviderEntry(providerId, entry as RawProviderEntry);
+}
+
+/**
+ * Read + JSON.parse the config file; `null` on missing/unreadable/malformed.
+ * Shared by the first-usable and targeted readers so the disk/posture logic
+ * stays in one place.
+ */
+function readConfigData(filePath: string): unknown {
+  let text: string;
+  try {
+    text = readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read the provider store from disk and return the canonical selection.
  *
  * @param filePath Override the config location (defaults to
@@ -206,19 +290,24 @@ export function parseZcodeConfig(data: unknown): ZcodeConfig | null {
  *   Never throws.
  */
 export function readZcodeConfig(filePath: string = defaultZcodeConfigPath()): ZcodeConfig | null {
-  let text: string;
-  try {
-    text = readFileSync(filePath, "utf8");
-  } catch {
-    return null;
-  }
+  return parseZcodeConfig(readConfigData(filePath));
+}
 
-  let data: unknown;
-  try {
-    data = JSON.parse(text) as unknown;
-  } catch {
-    return null;
-  }
-
-  return parseZcodeConfig(data);
+/**
+ * Read the provider store from disk and return the canonical selection for a
+ * SPECIFIC provider id (the GUI-selected default). Used by
+ * {@link ensureWorkspaceModel} to honour the GUI default.
+ *
+ * @param providerId The provider to target (the picker-resolved
+ *   `defaultProviderId`). NEVER falls through to another provider.
+ * @param filePath Override the config location (defaults to
+ *   {@link defaultZcodeConfigPath}). Useful for tests.
+ * @returns The selection, or `null` if the file is missing/unreadable/malformed,
+ *   the id is absent, or the entry is not a usable provider. Never throws.
+ */
+export function readZcodeConfigForProvider(
+  providerId: string,
+  filePath: string = defaultZcodeConfigPath(),
+): ZcodeConfig | null {
+  return parseZcodeConfigForProvider(readConfigData(filePath), providerId);
 }

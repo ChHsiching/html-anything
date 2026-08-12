@@ -51,7 +51,12 @@ import type {
   ZcodeProtocolRequest,
   ZcodeProtocolResponse,
 } from "./zcode-protocol";
-import { readZcodeConfig } from "./zcode-config";
+import {
+  readZcodeConfig,
+  readZcodeConfigForProvider,
+  type ZcodeConfig,
+} from "./zcode-config";
+import { readZcodeModelPicker } from "./zcode-model-picker";
 import { createZcodeStreamHandler } from "./zcode-stream";
 
 /** A mapped stream event, opaque to this layer. */
@@ -166,12 +171,20 @@ export interface EnsuredWorkspaceModel {
  * `ModelProtocolError: Model config is missing` unless the workspace has a
  * configured default model. This reads ZCode's own resolved config
  * (`~/.zcode/v2/config.json`, the file the GUI writes — NOT the template
- * `model-providers.json` whose coding-plan entries have `apiKey: ""`), picks
- * the first enabled provider with a non-empty API key, and runs
+ * `model-providers.json` whose coding-plan entries have `apiKey: ""`), resolves
+ * the model selection via {@link resolveWorkspaceModelConfig}, and runs
  * `workspace/upsertModelProvider` then `workspace/setDefaultModel` — exactly
  * once per booted child. After this, any number of `session/create` calls in
  * the same child lifetime succeed without re-relaying (probe-10 confirmed a
  * second create needs no relay).
+ *
+ * Selection (ADR-0010 Decision 2): the GUI-selected provider
+ * (`~/.zcode/v2/setting.json`'s `modelProviderFamilySelectedKeys`, resolved by
+ * the picker as `defaultProviderId`) is preferred when it is usable, so the
+ * workspace default matches the provider the user sees selected in the GUI;
+ * otherwise the first usable entry applies (the unchanged pre-#26 path
+ * live-verified by #14). Exactly ONE provider is upserted per relay — a
+ * per-agent non-default model pick rides on `session/create`'s `model` override.
  *
  * The relay is model SELECTION, not credential grafting: it reads ZCode's own
  * file and feeds the selection back to ZCode's own child. The login still
@@ -188,7 +201,7 @@ export async function ensureWorkspaceModel({
   signal,
   workspaceKey,
 }: EnsureWorkspaceModelOptions): Promise<EnsuredWorkspaceModel> {
-  const config = readZcodeConfig();
+  const config = resolveWorkspaceModelConfig();
   if (!config) {
     throw new Error(
       "No usable ZCode provider found in ~/.zcode/v2/config.json " +
@@ -215,6 +228,30 @@ export async function ensureWorkspaceModel({
   });
 
   return { providerId: config.provider, modelId: config.model };
+}
+
+/**
+ * Resolve the workspace-default model selection (ADR-0010 Decision 2).
+ *
+ * Prefers the GUI-selected provider — the picker-resolved `defaultProviderId`
+ * (`~/.zcode/v2/setting.json`'s `modelProviderFamilySelectedKeys`) — when it
+ * resolves to a usable provider, so the workspace default matches the provider
+ * the user sees selected in the ZCode GUI. Falls back to the first usable entry
+ * (`readZcodeConfig`) when the GUI default is absent or unusable — the
+ * unchanged pre-#26 path live-verified by #14. Returns exactly ONE provider
+ * (never `null`-skips to upsert all); `null` only when NO usable provider is
+ * configured, which the caller surfaces as an actionable error.
+ *
+ * Both candidates share {@link isUsableZcodeProvider} (via the config/picker
+ * readers), so the relay can no longer bind a provider the picker hides.
+ */
+function resolveWorkspaceModelConfig(): ZcodeConfig | null {
+  const guiProviderId = readZcodeModelPicker().defaultProviderId;
+  if (guiProviderId) {
+    const guiConfig = readZcodeConfigForProvider(guiProviderId);
+    if (guiConfig) return guiConfig;
+  }
+  return readZcodeConfig();
 }
 
 /**

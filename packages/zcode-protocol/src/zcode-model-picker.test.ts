@@ -60,8 +60,10 @@ const CONFIG = {
     // Mirrors the live `builtin:bigmodel` entry: enabled, no
     // systemDisabledReason, but apiKey is EMPTY. The GUI prompts for a key when
     // the user selects this provider; a headless adapter cannot, so its models
-    // must NOT surface in the picker. The filter matches ensureWorkspaceModel's
-    // relay reader (zcode-config.ts: enabled + apiKey non-empty + kind).
+    // must NOT surface in the picker. The filter is the shared
+    // isUsableZcodeProvider predicate (ADR-0010): enabled + no
+    // systemDisabledReason + recognized kind + non-empty apiKey — the SAME
+    // gate the workspace-default relay applies, so the two cannot drift.
     "builtin:bigmodel": {
       name: "Bigmodel",
       kind: "anthropic",
@@ -103,11 +105,12 @@ describe("parseZcodePickerModels", () => {
 
   it("excludes an enabled provider with no systemDisabledReason but an EMPTY apiKey", () => {
     // Mirrors the live `builtin:bigmodel` entry (enabled, no disabledReason,
-    // apiKey:""). The filter must match ensureWorkspaceModel's relay reader
-    // (zcode-config.ts): enabled + apiKey non-empty + kind. Otherwise the
-    // picker lists models the user cannot actually run, and (when the same
-    // modelId also exists on a usable provider) creates duplicate picker ids
-    // that break ModelPicker's key/active uniqueness contract.
+    // apiKey:""). The filter is the shared isUsableZcodeProvider predicate
+    // (ADR-0010): enabled + no systemDisabledReason + recognized kind +
+    // non-empty apiKey — the SAME gate the workspace-default relay applies.
+    // Otherwise the picker lists models the user cannot actually run, and (when
+    // the same modelId also exists on a usable provider) creates duplicate
+    // picker ids that break ModelPicker's key/active uniqueness contract.
     const models = parseZcodePickerModels({
       provider: {
         "builtin:bigmodel": {
