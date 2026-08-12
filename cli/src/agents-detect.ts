@@ -484,7 +484,9 @@ export function discoverZcodeAppImage(): string | null {
 /**
  * Locate the ZCode CLI binary. Probe order, first match wins (see ADR-0007):
  *   1. `ZCODE_BIN` env var — user override (absolute path, else PATH lookup)
- *   2. `zcode` on PATH (Linux `.deb`/AUR; rarely present on Windows/macOS)
+ *   2. `zcode` on PATH — a defensive probe only. ZCode's only official Linux
+ *      distribution is the AppImage (ADR-0007), so this rarely hits; it is NOT
+ *      a supported install shape (no `.deb`/AUR package is known to exist).
  *   3. Platform default:
  *        Windows : `%ZCODE_WINDOWS_APP_INSTALL_DIR%\resources\glm\zcode.cjs`
  *                  → `C:\Program Files\ZCode\resources\glm\zcode.cjs`
@@ -494,8 +496,11 @@ export function discoverZcodeAppImage(): string | null {
  *                  candidate — the AppImage binary doubles as the availability
  *                  signal AND the Electron driver, ADR-0007).
  *
- * On Windows/macOS the returned path IS the `.cjs` bundle. On Linux it is the
- * AppImage binary (the `.cjs` path is computed post-mount in the invoke layer).
+ * On Windows/macOS the returned path IS the `.cjs` bundle. On Linux the
+ * platform default is the AppImage binary (the `.cjs` path is computed
+ * post-mount in the invoke layer); a `ZCODE_BIN` pointing at a `.cjs` is
+ * returned as-is — the invoke layer then uses it directly, no mount
+ * (ADR-0010 decision 1).
  *
  * Discovery only — registering ZCode in the `AGENTS` array is T7. Returns
  * `null` (never throws) when nothing is found.
@@ -509,7 +514,9 @@ export function resolveZcodeBin(): string | null {
     const onPath = resolveOnPath(override);
     if (onPath) return onPath;
   }
-  // 2. `zcode` registered on PATH (Linux `.deb`/AUR packages do this).
+  // 2. `zcode` on PATH — defensive probe only; not a supported Linux install
+  // (ZCode ships as an AppImage per ADR-0007), kept so a hand-placed link still
+  // resolves. The override (1) and platform default (3) are the real paths.
   const pathHit = resolveOnPath("zcode");
   if (pathHit) return pathHit;
   // 3. Platform default.

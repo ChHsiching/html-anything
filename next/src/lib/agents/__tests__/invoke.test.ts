@@ -1506,6 +1506,65 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     expect(mountKillSpy).toHaveBeenCalled();
   });
+
+  // T4 (#30 / ADR-0010 decision 1): resolveZcodeBin() honours a ZCODE_BIN that
+  // points directly at the zcode.cjs bundle (the detect tests set
+  // ZCODE_BIN=<…>.cjs and assert available=true). For a `.cjs` the AppImage
+  // self-mount would spawn `<.cjs> --appimage-mount` and fail — a JS bundle is
+  // not an executable AppImage. So on Linux the `.cjs` is used directly: exactly
+  // ONE spawn (the app-server child), argv carries the override verbatim, and no
+  // spawn argv contains `--appimage-mount`. The AppImage install is untouched
+  // (the cases above); only the `.cjs` shape takes the direct-use branch.
+  it("(T4) uses a ZCODE_BIN .cjs override directly on Linux — no AppImage mount (#30)", async () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    vi.stubEnv("ZCODE_BIN", "/opt/zcode/override.cjs");
+    existsSyncDelegate.mockImplementation((p: string) =>
+      p === "/opt/zcode/override.cjs" ||
+      p === "/resolved/node" ||
+      p === "/bin/sh",
+    );
+    const app = makeAppServerChild();
+    mockSpawn.mockReturnValue(app.child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "build it",
+      binOverride: "/resolved/node",
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    const eventsPromise = collectStream(stream);
+
+    app.stdout.write(
+      `${JSON.stringify({
+        method: "session/event",
+        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+      })}\n`,
+    );
+    app.stdout.end();
+    await new Promise((r) => setImmediate(r));
+    app.child.emit("close", 0);
+
+    const events = await eventsPromise;
+
+    // Exactly ONE spawn — the app-server child. No mount child is spawned.
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const calls = mockSpawn.mock.calls as unknown as [string, string[]][];
+    const [appCall] = calls;
+    expect(appCall[0]).toBe("/resolved/node");
+    // argv uses the .cjs override verbatim — NOT a `<mount>/resources/glm/...` path.
+    expect(appCall[1]).toEqual(["/opt/zcode/override.cjs", "app-server"]);
+    // No spawn argv contains `--appimage-mount` (the mount flow never ran).
+    for (const [, argv] of calls) {
+      expect(argv).not.toContain("--appimage-mount");
+    }
+    // The .cjs override propagates to the start event too.
+    const startEv = events.find((e) => e.type === "start");
+    expect(startEv).toMatchObject({
+      type: "start",
+      argv: ["/opt/zcode/override.cjs", "app-server"],
+    });
+  });
 });
 
 // Regression guards for the argv branch — keep parity with the pre-T6 behavior

@@ -639,42 +639,57 @@ function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): Readable
       // agents must not inherit it. (ADR-0004 / T9.)
       const env = { ...envFor(opts.agent), ELECTRON_RUN_AS_NODE: "1" };
 
-      // ADR-0007: on Linux the `.cjs` lives inside the AppImage mount. Self-
-      // mount at turn start to expose it, then spawn
+      // ADR-0007 (+ ADR-0010 decision 1): on Linux the `.cjs` lives inside the
+      // AppImage mount. Self-mount at turn start to expose it, then spawn
       // `node <mountPoint>/resources/glm/zcode.cjs app-server`. The mount child
       // is killed on teardown/cancel (per-turn mount+unmount, NOT a process-
-      // level cache — keeps the model stateless, matching Win/macOS). On
+      // level cache — keeps the model stateless, matching Win/macOS). EXCEPTION:
+      // when resolveZcodeBin() returns a `.cjs` directly (a ZCODE_BIN override
+      // pointing at the bundle), use it as-is — no mount (T4 / #30). On
       // Windows/macOS the `.cjs` is a permanent on-disk file; skip mounting.
       let cjsPath: string;
       if (process.platform === "linux") {
-        const appImage = resolveZcodeBin();
-        if (!appImage) {
+        const resolved = resolveZcodeBin();
+        if (!resolved) {
           safeEnqueue({
             type: "error",
             message:
-              "ZCode AppImage not found. Open the ZCode GUI once (to write its .desktop entry), set ZCODE_BIN, or put `zcode` on PATH.",
+              "ZCode AppImage not found. Open the ZCode GUI once (to write its .desktop entry) or set ZCODE_BIN to the AppImage (or the zcode.cjs bundle).",
           });
           safeClose();
           return;
         }
-        try {
-          const mounted = await mountZcodeAppImage(appImage, {
-            cwd: opts.cwd,
-            signal: opts.signal,
-          });
-          mountChild = mounted.mountChild;
-          cjsPath = path.posix.join(
-            mounted.mountPoint,
-            "resources",
-            "glm",
-            "zcode.cjs",
-          );
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          try { mountChild?.kill("SIGTERM"); } catch {}
-          safeEnqueue({ type: "error", message });
-          safeClose();
-          return;
+        // T4 (#30 / ADR-0010 decision 1): a ZCODE_BIN that points directly at
+        // the zcode.cjs bundle — the documented escape hatch; the detect tests
+        // set ZCODE_BIN=<…>.cjs and assert available=true — is usable AS-IS. A
+        // `.cjs` is a JS bundle, not an executable AppImage, so the self-mount
+        // would spawn `<.cjs> --appimage-mount` and fail (detect promises
+        // available; every turn then failed at mount). Use the `.cjs` directly
+        // and skip the mount (mountChild stays null). Only the AppImage shape
+        // needs the self-mount flow (ADR-0007 decision 2); the non-Linux branch
+        // below is unchanged.
+        if (resolved.endsWith(".cjs")) {
+          cjsPath = resolved;
+        } else {
+          try {
+            const mounted = await mountZcodeAppImage(resolved, {
+              cwd: opts.cwd,
+              signal: opts.signal,
+            });
+            mountChild = mounted.mountChild;
+            cjsPath = path.posix.join(
+              mounted.mountPoint,
+              "resources",
+              "glm",
+              "zcode.cjs",
+            );
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            try { mountChild?.kill("SIGTERM"); } catch {}
+            safeEnqueue({ type: "error", message });
+            safeClose();
+            return;
+          }
         }
       } else {
         cjsPath = resolveZcodeBin() ?? ZCODE_CJS_SENTINEL;
