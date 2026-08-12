@@ -22,13 +22,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createZcodeProtocolClient } from "./zcode-protocol.js";
+import { createZcodeProtocolClient } from "./zcode-protocol";
 import {
   ensureWorkspaceModel,
   startZcodeProtocolTurn,
   type EnsuredWorkspaceModel,
-} from "./zcode-session.js";
-import { readZcodeConfig } from "./zcode-config.js";
+} from "./zcode-session";
+import { readZcodeConfig } from "./zcode-config";
 
 /**
  * Resolve the Electron binary + zcode.cjs path. The Electron binary is the

@@ -28,7 +28,7 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { isRecord, type JsonRecord } from "./internal.js";
+import { isRecord, type JsonRecord } from "./internal";
 
 /** A request we send to the app-server. The caller chooses the `id`. */
 export interface ZcodeProtocolRequest {

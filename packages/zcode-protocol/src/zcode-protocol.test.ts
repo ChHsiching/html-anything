@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { createZcodeProtocolClient } from "./zcode-protocol.js";
+import { createZcodeProtocolClient } from "./zcode-protocol";
 
 /**
  * A fake `app-server` child built from PassThrough streams. The protocol client

@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { createZcodeProtocolClient } from "./zcode-protocol.js";
-import { startZcodeProtocolTurn } from "./zcode-session.js";
+import { createZcodeProtocolClient } from "./zcode-protocol";
+import { startZcodeProtocolTurn } from "./zcode-session";
 
 /**
  * Module-composition seam: drive `startZcodeProtocolTurn` through a REAL

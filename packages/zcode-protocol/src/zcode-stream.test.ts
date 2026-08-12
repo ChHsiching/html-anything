@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createZcodeStreamHandler } from "./zcode-stream.js";
+import { createZcodeStreamHandler } from "./zcode-stream";
 
 /**
  * The stream handler maps raw app-server notification frames into a small

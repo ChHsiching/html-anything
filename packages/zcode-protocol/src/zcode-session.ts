@@ -45,14 +45,14 @@
  * can stop receiving events (e.g. on abort) without disposing the client.
  */
 
-import { isRecord, type JsonRecord } from "./internal.js";
+import { isRecord, type JsonRecord } from "./internal";
 import type {
   ZcodeNotificationListener,
   ZcodeProtocolRequest,
   ZcodeProtocolResponse,
-} from "./zcode-protocol.js";
-import { readZcodeConfig } from "./zcode-config.js";
-import { createZcodeStreamHandler } from "./zcode-stream.js";
+} from "./zcode-protocol";
+import { readZcodeConfig } from "./zcode-config";
+import { createZcodeStreamHandler } from "./zcode-stream";
 
 /** A mapped stream event, opaque to this layer. */
 type ZcodeEvent = JsonRecord;

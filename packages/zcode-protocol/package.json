@@ -5,17 +5,16 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": "./dist/zcode-protocol.js",
-    "./zcode-protocol": "./dist/zcode-protocol.js",
-    "./zcode-config": "./dist/zcode-config.js",
-    "./zcode-model-picker": "./dist/zcode-model-picker.js",
-    "./zcode-session": "./dist/zcode-session.js",
-    "./zcode-stream": "./dist/zcode-stream.js"
+    ".": "./src/zcode-protocol.ts",
+    "./zcode-protocol": "./src/zcode-protocol.ts",
+    "./zcode-config": "./src/zcode-config.ts",
+    "./zcode-model-picker": "./src/zcode-model-picker.ts",
+    "./zcode-session": "./src/zcode-session.ts",
+    "./zcode-stream": "./src/zcode-stream.ts"
   },
-  "main": "./dist/zcode-protocol.js",
-  "types": "./dist/zcode-protocol.d.ts",
+  "main": "./src/zcode-protocol.ts",
+  "types": "./src/zcode-protocol.ts",
   "files": [
-    "dist",
     "src"
   ],
   "scripts": {

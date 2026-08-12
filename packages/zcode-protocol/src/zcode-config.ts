@@ -31,7 +31,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isRecord } from "./internal.js";
+import { isRecord } from "./internal";
 
 /**
  * The API-key credential object the app-server's `workspace/upsertModelProvider`

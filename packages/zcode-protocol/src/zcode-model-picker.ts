@@ -26,7 +26,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isRecord } from "./internal.js";
+import { isRecord } from "./internal";
 
 /**
  * A picker entry. Mirrors the app's `ModelOption` shape (`{ id, label }`) and

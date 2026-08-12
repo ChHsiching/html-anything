@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { ZcodeProtocolClientLike } from "./zcode-session.js";
-import { startZcodeProtocolTurn, ensureWorkspaceModel } from "./zcode-session.js";
+import type { ZcodeProtocolClientLike } from "./zcode-session";
+import { startZcodeProtocolTurn, ensureWorkspaceModel } from "./zcode-session";
 
 // Mock the config reader so tests don't touch disk. The relay's job is to
 // send the right frames; the config reader is tested separately.

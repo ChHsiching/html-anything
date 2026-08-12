@@ -6,7 +6,7 @@ import {
   parseZcodeConfig,
   readZcodeConfig,
   defaultZcodeConfigPath,
-} from "./zcode-config.js";
+} from "./zcode-config";
 
 /**
  * #14: the config reader reads the GUI's RESOLVED `~/.zcode/v2/config.json`

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseZcodePickerModels,
   resolveZcodeDefaultSelection,
-} from "./zcode-model-picker.js";
+} from "./zcode-model-picker";
 
 // A config shape mirroring the live GUI's resolved config (redacted): two
 // enabled providers (one with 2 models, one with 1) + one disabled provider

@@ -17,7 +17,7 @@
  *    never forwards them — unrecognised payloads are dropped, not re-emitted.
  */
 
-import { isRecord, type JsonRecord } from "./internal.js";
+import { isRecord, type JsonRecord } from "./internal";
 
 /** A mapped stream event handed to {@link createZcodeStreamHandler}'s `onEvent`.
  *
