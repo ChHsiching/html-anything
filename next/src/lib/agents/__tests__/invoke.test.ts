@@ -811,32 +811,44 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
       p === "/bin/sh",
     );
     vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "C:\\Program Files\\ZCode");
+    // This test forces win32, so assert the win32 spawn shape UNCONDITIONALLY.
+    // The module-level USE_SHELL is evaluated once at import from the REAL host,
+    // so branching on it makes the assertion host-dependent: on Linux/macOS CI
+    // USE_SHELL is false (expects the unquoted path) but production quotes it
+    // under the stubbed win32 → the test fails CI. Restore the platform in
+    // finally so later tests in this file don't inherit win32.
+    const originalPlatform = process.platform;
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      const stream = invokeAgent({ agent: "zcode", prompt: "build it" });
 
-    const stream = invokeAgent({ agent: "zcode", prompt: "build it" });
+      await new Promise((r) => setTimeout(r, 0));
+      const eventsPromise = collectStream(stream);
+      stdout.write(
+        `${JSON.stringify({
+          method: "session/event",
+          params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
+        })}\n`,
+      );
+      stdout.end();
+      await new Promise((r) => setImmediate(r));
+      child.emit("close", 0);
+      await eventsPromise;
 
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-    await eventsPromise;
-
-    // The decisive assertion: spawn was called with the Electron exe as bin
-    // (quoted on win32 because the path contains a space).
-    expect(mockSpawn).toHaveBeenCalledWith(
-      USE_SHELL ? `"C:\\Program Files\\ZCode\\ZCode.exe"` : "C:\\Program Files\\ZCode\\ZCode.exe",
-      expect.any(Array),
-      expect.objectContaining({
-        env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
-      }),
-    );
+      // The decisive assertion: spawn was called with the Electron exe as bin,
+      // quoted + shell:true on win32 (the path contains a space; cmd.exe resolves
+      // the .exe). Asserted unconditionally because this test forces win32.
+      expect(mockSpawn).toHaveBeenCalledWith(
+        `"C:\\Program Files\\ZCode\\ZCode.exe"`,
+        expect.any(Array),
+        expect.objectContaining({
+          env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
+          shell: true,
+        }),
+      );
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+    }
   });
 
   // T15 (#18 / ADR-0005 decision 3): the "no node AND no Electron exe" error
