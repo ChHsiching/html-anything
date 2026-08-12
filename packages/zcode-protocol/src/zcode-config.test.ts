@@ -32,7 +32,7 @@ describe("parseZcodeConfig", () => {
           name: "BigModel - Coding Plan",
           kind: "anthropic",
           options: {
-            apiKey: "a4b823de91624650996d7e1ae2b3ade4.z83SWTMg59YNkuFs",
+            apiKey: "test-api-key-not-real",
             baseURL: "https://open.bigmodel.cn/api/anthropic",
           },
           enabled: true,
@@ -57,7 +57,7 @@ describe("parseZcodeConfig", () => {
       kind: "anthropic",
       apiKey: {
         source: "inline",
-        value: "a4b823de91624650996d7e1ae2b3ade4.z83SWTMg59YNkuFs",
+        value: "test-api-key-not-real",
       },
       models: [{ modelId: "GLM-5.2" }, { modelId: "GLM-5-Turbo" }],
       baseURL: "https://open.bigmodel.cn/api/anthropic",
