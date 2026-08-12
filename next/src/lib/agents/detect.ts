@@ -485,17 +485,22 @@ export function resolveOnPath(bin: string): string | null {
   return null;
 }
 
-// ─── Linux AppImage discovery (ADR-0007) ──────────────────────────────
+// ─── Linux install discovery (.deb + AppImage; ADR-0007 / ADR-0010) ────
 //
-// On Linux ZCode ships as an AppImage: a single compressed squashfs file with
-// `zcode.cjs` packed inside, reachable only while the AppImage is mounted.
-// There is no on-disk `.cjs` to probe and no fixed filename — the download is
-// `ZCode-<version>-linux-<arch>.AppImage`. Instead of guessing, we read the
-// XDG `.desktop` entry ZCode itself writes on first GUI launch
-// (`~/.local/share/applications/zcode.desktop`); its `Exec=` line carries the
-// real path whatever the user named/placed the file. The same bar as login —
-// a user must have run ZCode once — and a freedesktop.org standard honoured by
-// every Linux desktop. See ADR-0007 decision 1.
+// ZCode's official Linux distributions are the `.deb` package AND the AppImage
+// (ADR-0007's "AppImage-only" premise was wrong — corrected by T5 / ADR-0010).
+// The two are told apart by a loose `zcode.cjs`:
+//   - `.deb` installs to /opt/ZCode/ with a loose resources/glm/zcode.cjs next
+//     to the Electron binary (/opt/ZCode/zcode) — the same layout as the
+//     Windows/macOS installs, so it is probed the same way (on-disk .cjs).
+//   - AppImage is a single compressed squashfs with the .cjs packed inside,
+//     reachable only while mounted. There is no loose `.cjs` and no fixed
+//     filename (`ZCode-<version>-linux-<arch>.AppImage`), so the AppImage path
+//     is read from the XDG `.desktop` entry ZCode writes on first GUI launch
+//     (`~/.local/share/applications/zcode.desktop`); its `Exec=` line carries
+//     the real path whatever the user named/placed the file. The same bar as
+//     login — a user must have run ZCode once — and a freedesktop.org standard
+//     honoured by every Linux desktop. See ADR-0007 decision 1 + ADR-0010.
 
 /** Path to the XDG `.desktop` entry ZCode generates on first GUI launch. */
 const ZCODE_DESKTOP_PATH = posix.join(
@@ -567,23 +572,26 @@ export function discoverZcodeAppImage(): string | null {
 /**
  * Locate the ZCode CLI binary. Probe order, first match wins (see ADR-0007):
  *   1. `ZCODE_BIN` env var — user override (absolute path, else PATH lookup)
- *   2. `zcode` on PATH — a defensive probe only. ZCode's only official Linux
- *      distribution is the AppImage (ADR-0007), so this rarely hits; it is NOT
- *      a supported install shape (no `.deb`/AUR package is known to exist).
+ *   2. `zcode` on PATH — a defensive probe only. ZCode's official Linux
+ *      distributions are the `.deb` and the AppImage (ADR-0007 / ADR-0010), so
+ *      this rarely hits; it is NOT a supported install shape (no PATH shim is
+ *      known to ship with either).
  *   3. Platform default:
  *        Windows : `%ZCODE_WINDOWS_APP_INSTALL_DIR%\resources\glm\zcode.cjs`
  *                  → `C:\Program Files\ZCode\resources\glm\zcode.cjs`
  *        macOS   : `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`
- *        Linux   : the AppImage path from the `.desktop` `Exec=` line (the
- *                  `.cjs` lives inside the mount, so there is no on-disk cjs
- *                  candidate — the AppImage binary doubles as the availability
- *                  signal AND the Electron driver, ADR-0007).
+ *        Linux   : on-disk `zcode.cjs` at
+ *                  `/opt/ZCode/resources/glm/zcode.cjs` (the `.deb` install —
+ *                  same loose-file layout as Windows/macOS); else the AppImage
+ *                  path from the `.desktop` `Exec=` line (the `.cjs` lives
+ *                  inside the mount, so the AppImage binary doubles as the
+ *                  availability signal AND the Electron driver, ADR-0007).
  *
- * On Windows/macOS the returned path IS the `.cjs` bundle. On Linux the
- * platform default is the AppImage binary (the `.cjs` path is computed
- * post-mount in the invoke layer); a `ZCODE_BIN` pointing at a `.cjs` is
- * returned as-is — the invoke layer then uses it directly, no mount
- * (ADR-0010 decision 1).
+ * On Windows/macOS (and a Linux `.deb`) the returned path IS the `.cjs` bundle.
+ * On a Linux AppImage install the platform default is the AppImage binary (the
+ * `.cjs` path is computed post-mount in the invoke layer); a `ZCODE_BIN` or
+ * on-disk `.cjs` is returned as-is — the invoke layer then uses it directly,
+ * no mount (ADR-0010 decision 1).
  *
  * Discovery only — registering ZCode in the `AGENTS` array is T7. Returns
  * `null` (never throws) when nothing is found.
@@ -598,15 +606,23 @@ export function resolveZcodeBin(): string | null {
     if (onPath) return onPath;
   }
   // 2. `zcode` on PATH — defensive probe only; not a supported Linux install
-  // (ZCode ships as an AppImage per ADR-0007), kept so a hand-placed link still
-  // resolves. The override (1) and platform default (3) are the real paths.
+  // (ZCode ships as a `.deb` or AppImage per ADR-0007 / ADR-0010), kept so a
+  // hand-placed link still resolves. The override (1) and platform default (3)
+  // are the real paths.
   const pathHit = resolveOnPath("zcode");
   if (pathHit) return pathHit;
   // 3. Platform default.
   if (process.platform === "linux") {
-    // ADR-0007: the `.cjs` lives inside the AppImage mount — there is no
-    // on-disk candidate. Discover the AppImage binary via the `.desktop` entry
-    // and return it (availability + Electron driver + mount source).
+    // T5 / ADR-0010: probe the on-disk `.cjs` BEFORE the AppImage mount. A
+    // loose resources/glm/zcode.cjs at the install root cleanly distinguishes
+    // a `.deb` (or unpacked) install from an AppImage (the `.cjs` is packed in
+    // the squashfs, so no loose file sits next to it). The invoke layer's
+    // `.cjs`-direct branch (T4) then runs it without mounting.
+    for (const candidate of defaultZcodeCjsPaths()) {
+      if (existsSync(candidate)) return candidate;
+    }
+    // AppImage: the `.cjs` lives inside the mount — discover the binary via
+    // the `.desktop` entry (availability + Electron driver + mount source).
     const appImage = discoverZcodeAppImage();
     if (appImage && existsSync(appImage)) return appImage;
     return null;
@@ -645,10 +661,13 @@ export function defaultZcodeCjsPaths(): string[] {
   if (platform === "darwin") {
     return [posix.join("/Applications/ZCode.app", "Contents", "Resources", "glm", "zcode.cjs")];
   }
-  // Linux: the `.cjs` lives inside the AppImage mount, not on disk — there are
-  // no static `.cjs` candidates. Discovery goes through the `.desktop` entry in
-  // resolveZcodeBin(); see ADR-0007 decision 1.
-  return [];
+  // T5 / ADR-0010: the official `.deb` install lays a loose
+  // resources/glm/zcode.cjs at /opt/ZCode/ (same layout as Windows/macOS), so
+  // it is probed the same way. An AppImage packs the `.cjs` inside its
+  // squashfs (no loose file), so when only the AppImage is installed this
+  // candidate misses and resolveZcodeBin() falls back to `.desktop` discovery.
+  // See ADR-0007 decision 1 + ADR-0010.
+  return [posix.join("/opt/ZCode", "resources", "glm", "zcode.cjs")];
 }
 
 /**
@@ -701,15 +720,21 @@ export function resolveZcodeNodeBin(): string {
   // (zcode.cjs found ⟺ ZCode installed ⟺ exe exists). Return it on the miss
   // path too — see the doc comment above for the orphaned-.cjs rationale.
   if (process.platform === "linux") {
-    // ADR-0007: on Linux the AppImage IS the Electron driver. Discover it via
-    // the same `.desktop` entry resolveZcodeBin() uses (they are the same
-    // binary). The canonical `~/Applications/ZCode.AppImage` guess is the
-    // terminal fallback so the contract (`string`, never null) holds even for
-    // a hand-crafted caller that bypassed detect — the spawn's own ENOENT then
+    // T5 / ADR-0010: probe the `.deb` Electron driver (/opt/ZCode/zcode) BEFORE
+    // the AppImage. Same role as ZCode.exe on Windows — under
+    // ELECTRON_RUN_AS_NODE=1 it acts as node — and a `.deb`-only host has no
+    // AppImage to mount, so without this probe it could not drive the `.cjs`.
+    // defaultZcodeElectronExePaths() lists the `.deb` driver first; the
+    // AppImage is discovered via its `.desktop` entry (the real user-named
+    // path, not the canonical guess), and the last candidate is the terminal
+    // fallback so the contract (`string`, never null) holds even for a
+    // hand-crafted caller that bypassed detect — the spawn's own ENOENT then
     // surfaces the real problem.
+    const electronPaths = defaultZcodeElectronExePaths();
+    if (existsSync(electronPaths[0])) return electronPaths[0];
     const appImage = discoverZcodeAppImage();
     if (appImage && existsSync(appImage)) return appImage;
-    return posix.join(homedir(), "Applications", "ZCode.AppImage");
+    return electronPaths[electronPaths.length - 1];
   }
   const electronPaths = defaultZcodeElectronExePaths();
   for (const candidate of electronPaths) {
@@ -729,7 +754,8 @@ export function resolveZcodeNodeBin(): string {
  * The exe sits at the install root (not under `resources/glm/` like the `.cjs`):
  *   Windows : `<installDir>\ZCode.exe` → `C:\Program Files\ZCode\ZCode.exe`
  *   macOS   : `/Applications/ZCode.app/Contents/MacOS/ZCode`
- *   Linux   : `~/Applications/ZCode.AppImage` (the AppImage IS the executable)
+ *   Linux   : `/opt/ZCode/zcode` (the `.deb` Electron binary) and
+ *             `~/Applications/ZCode.AppImage` (the AppImage IS the executable)
  */
 export function defaultZcodeElectronExePaths(): string[] {
   const platform = process.platform;
@@ -746,9 +772,14 @@ export function defaultZcodeElectronExePaths(): string[] {
   if (platform === "darwin") {
     return [posix.join("/Applications/ZCode.app", "Contents", "MacOS", "ZCode")];
   }
-  // Linux: the AppImage is itself the executable (and under
-  // ELECTRON_RUN_AS_NODE=1 acts as node), same path the .cjs fallback probes.
-  return [posix.join(homedir(), "Applications", "ZCode.AppImage")];
+  // T5 / ADR-0010: the `.deb` install ships /opt/ZCode/zcode (the Electron
+  // binary, driven under ELECTRON_RUN_AS_NODE=1 as node); the AppImage is itself
+  // the executable. The `.deb` driver is listed first so resolveZcodeNodeBin()
+  // probes it before AppImage discovery.
+  return [
+    posix.join("/opt/ZCode", "zcode"),
+    posix.join(homedir(), "Applications", "ZCode.AppImage"),
+  ];
 }
 
 export type DetectedAgent = {

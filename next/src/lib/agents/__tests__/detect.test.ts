@@ -43,6 +43,7 @@ import {
   AGENTS,
   DEFAULT_MODEL,
   defaultZcodeCjsPaths,
+  defaultZcodeElectronExePaths,
   detectAgents,
   discoverZcodeAppImage,
   parseZcodeDesktopExec,
@@ -531,9 +532,19 @@ describe("resolveZcodeBin / resolveZcodeNodeBin on Linux (ADR-0007)", () => {
     );
   });
 
-  it("defaultZcodeCjsPaths() returns [] on Linux (the .cjs lives inside the mount)", () => {
+  it("defaultZcodeCjsPaths() returns the .deb .cjs candidate on Linux (T5)", () => {
     stubPlatform("linux");
-    expect(defaultZcodeCjsPaths()).toEqual([]);
+    expect(defaultZcodeCjsPaths()).toEqual([
+      "/opt/ZCode/resources/glm/zcode.cjs",
+    ]);
+  });
+
+  it("defaultZcodeElectronExePaths() lists the .deb driver before the AppImage on Linux (T5)", () => {
+    stubPlatform("linux");
+    expect(defaultZcodeElectronExePaths()).toEqual([
+      "/opt/ZCode/zcode",
+      posix.join(homedir(), "Applications", "ZCode.AppImage"),
+    ]);
   });
 
   it("defaultZcodeCjsPaths() Windows/macOS branches are unchanged", () => {
@@ -549,5 +560,47 @@ describe("resolveZcodeBin / resolveZcodeNodeBin on Linux (ADR-0007)", () => {
     expect(defaultZcodeCjsPaths()).toEqual([
       "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
     ]);
+  });
+});
+
+// T5 (#31 / ADR-0010): the official .deb install lays a loose zcode.cjs at
+// /opt/ZCode/resources/glm/zcode.cjs next to the Electron driver /opt/ZCode/zcode
+// (verified against the unpacked ZCode-3.7.6-linux-x64.deb, 2026-08-13). This is
+// the same loose-file layout as Windows/macOS, so the .deb is probed the same
+// way: resolveZcodeBin() checks the on-disk .cjs BEFORE the AppImage (a loose
+// .cjs cleanly distinguishes a .deb from an AppImage, whose .cjs is packed in
+// the squashfs), and resolveZcodeNodeBin() probes /opt/ZCode/zcode so a .deb-
+// only host without a system node can still drive the .cjs — no mount needed.
+describe("resolveZcodeBin / resolveZcodeNodeBin Linux .deb install (T5 / ADR-0010)", () => {
+  const desktopPath = posix.join(
+    homedir(),
+    ".local",
+    "share",
+    "applications",
+    "zcode.desktop",
+  );
+
+  it("resolveZcodeBin() returns the on-disk .deb .cjs before AppImage discovery", () => {
+    stubPlatform("linux");
+    // The .deb .cjs exists. An AppImage is ALSO discoverable here — the on-disk
+    // .cjs probe must win so a .deb install never needlessly mounts.
+    existsSyncMock.mockImplementation(
+      (p) =>
+        p === "/opt/ZCode/resources/glm/zcode.cjs" ||
+        p === "/opt/ZCode.AppImage" ||
+        p === desktopPath,
+    );
+    readFileSyncMock.mockReturnValue(
+      "[Desktop Entry]\nExec=/opt/ZCode.AppImage\n",
+    );
+
+    expect(resolveZcodeBin()).toBe("/opt/ZCode/resources/glm/zcode.cjs");
+  });
+
+  it("resolveZcodeNodeBin() returns /opt/ZCode/zcode when no system node (.deb-only)", () => {
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation((p) => p === "/opt/ZCode/zcode");
+
+    expect(resolveZcodeNodeBin()).toBe("/opt/ZCode/zcode");
   });
 });
