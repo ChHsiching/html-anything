@@ -175,6 +175,64 @@ describe("parseZcodePickerModels", () => {
     expect(models.map((m) => m.id)).toEqual(["good-model"]);
   });
 
+  it("dedups by modelId: first-in-config-order wins with no preference; preferredProviderId wins with one", () => {
+    // Two USABLE providers sharing a modelId (GLM-5.2) — the case the apiKey
+    // filter cannot catch (both have real keys). Dedup guarantees one entry per
+    // modelId (T7 / ADR-0010 Decision 3), keeping the bare modelId as the id so
+    // the resolver / modals / cli are unchanged.
+    const DUP_CONFIG = {
+      provider: {
+        "builtin:bigmodel-coding-plan": {
+          kind: "anthropic",
+          options: { apiKey: "coding-plan-key" },
+          enabled: true,
+          models: { "GLM-5.2": {}, "GLM-5-Turbo": {} },
+        },
+        "builtin:openai-direct": {
+          kind: "anthropic",
+          options: { apiKey: "direct-key" },
+          enabled: true,
+          models: { "GLM-5.2": {}, "gpt-oss": {} },
+        },
+      },
+    };
+
+    // (1) No preferredProviderId → the FIRST usable provider's (coding-plan)
+    // entry wins the GLM-5.2 collision; GLM-5.2 appears once. gpt-oss is unique
+    // to openai-direct so it survives. Order = first-occurrence (display order).
+    const noPref = parseZcodePickerModels(DUP_CONFIG);
+    expect(noPref).toEqual([
+      { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
+      { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
+      { id: "gpt-oss", label: "gpt-oss", providerId: "builtin:openai-direct" },
+    ]);
+
+    // (2) preferredProviderId = openai-direct → the GLM-5.2 collision resolves to
+    // the preferred provider's entry (providerId flips to openai-direct), still at
+    // the first-occurrence position; the rest is unchanged.
+    const withPref = parseZcodePickerModels(DUP_CONFIG, "builtin:openai-direct");
+    expect(withPref).toEqual([
+      { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:openai-direct" },
+      { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
+      { id: "gpt-oss", label: "gpt-oss", providerId: "builtin:openai-direct" },
+    ]);
+  });
+
+  it("dedup preferredProviderId is a no-op when the preferred provider is not among the colliding entries", () => {
+    // Same collision as above, but preferredProviderId points at a provider that
+    // does NOT carry the duplicate modelId → falls back to first-in-config-order.
+    const models = parseZcodePickerModels(
+      {
+        provider: {
+          "p-a": { kind: "anthropic", options: { apiKey: "k" }, enabled: true, models: { "shared": {} } },
+          "p-b": { kind: "anthropic", options: { apiKey: "k" }, enabled: true, models: { "shared": {} } },
+        },
+      },
+      "builtin:not-present",
+    );
+    expect(models).toEqual([{ id: "shared", label: "shared", providerId: "p-a" }]);
+  });
+
   it("preserves insertion order (GUI display order) within and across providers", () => {
     const models = parseZcodePickerModels({
       provider: {

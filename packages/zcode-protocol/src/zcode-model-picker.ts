@@ -52,9 +52,13 @@ export interface ZcodePickerModel {
 /** The dynamic picker result handed to the detect layer. */
 export interface ZcodePickerOptions {
   /**
-   * Model entries for every `enabled` provider (no `systemDisabledReason`),
-   * each model id becoming one entry. Caller prepends `DEFAULT_MODEL`.
-   * Insertion order follows `config.json` (the GUI's display order). Empty
+   * Model entries for every usable provider (the shared
+   * {@link isUsableZcodeProvider} predicate), deduped by modelId (T7 /
+   * ADR-0010 Decision 3): at most one entry per modelId, so when two usable
+   * providers share a modelId only the GUI-default provider's entry survives
+   * ({@link defaultProviderId} is passed as the dedup preference). Caller
+   * prepends `DEFAULT_MODEL`. Insertion order follows `config.json` (the GUI's
+   * display order; a deduped entry keeps its first-occurrence position). Empty
    * when no usable provider is configured — caller falls back to
    * `[DEFAULT_MODEL]`.
    */
@@ -121,38 +125,82 @@ export function defaultZcodeSettingPath(): string {
  * check is load-bearing: the live GUI keeps first-party placeholders like
  * `builtin:bigmodel` with `enabled:true` but `apiKey:""` (the GUI prompts for
  * a key when the user selects it); a headless adapter cannot prompt, so those
- * models would be offered-but-broken. Dropping them here also keeps model ids
- * unique across the picker (the same modelId often exists under both the
- * placeholder and the usable Coding Plan provider), preserving ModelPicker's
- * `key={id}` / `active = id === modelId` uniqueness contract.
+ * models would be offered-but-broken.
+ *
+ * ## Uniqueness: dedup by modelId (T7 / ADR-0010 Decision 3)
+ *
+ * The apiKey filter alone does NOT keep model ids unique when **two usable
+ * providers** carry the same modelId (e.g. a Coding Plan and a separately-keyed
+ * provider both exposing `GLM-5.2`). That yields duplicate `id`s, which break
+ * ModelPicker's `key={id}` / `active = id === modelId` uniqueness contract. So
+ * after the usable filter, entries are **deduped by modelId**: at most one entry
+ * per modelId. When a modelId collides across providers, the entry whose
+ * `providerId === preferredProviderId` wins (the GUI-default provider — even if
+ * a different provider appeared first in config order); with no preference, or
+ * the preferred provider not among the colliding ones, the first-in-config-order
+ * entry wins (the GUI's display order). The kept entry keeps the bare modelId
+ * as its `id` (shape unchanged) and sits at the modelId's first-occurrence
+ * position, so GUI display order is preserved; only the `providerId` may change.
+ *
+ * @param data The decoded `config.json` (its `provider` map is read).
+ * @param preferredProviderId Optional: the GUI-default provider id. When a
+ *   modelId appears under multiple usable providers, the entry for this provider
+ *   is the one kept. `null`/`undefined`/unknown → first-in-config-order wins.
+ *   Wired from {@link readZcodeModelPicker} via `resolveZcodeDefaultSelection`.
  *
  * Exported for direct unit testing. Iterates providers in insertion order
  * (config.json's object key order = the GUI's display order); within a
  * provider, models iterate in their map key order. Tolerant: malformed entries
  * are skipped, never thrown on.
  */
-export function parseZcodePickerModels(data: unknown): ZcodePickerModel[] {
+export function parseZcodePickerModels(
+  data: unknown,
+  preferredProviderId?: string | null,
+): ZcodePickerModel[] {
   if (!isRecord(data)) return [];
   const providers = isRecord(data.provider) ? data.provider : null;
   if (!providers) return [];
 
-  const models: ZcodePickerModel[] = [];
+  // Pass 1: collect one candidate per usable-provider model, in config (GUI
+  // display) order. Only usable providers (the shared predicate) expose their
+  // models — see isUsableZcodeProvider for why the apiKey check is load-bearing
+  // (placeholder providers would otherwise offer models the headless adapter
+  // cannot run).
+  const candidates: ZcodePickerModel[] = [];
   for (const [providerId, entry] of Object.entries(providers)) {
     if (!providerId || !isRecord(entry)) continue;
     const raw = entry as RawProviderEntry;
-    // Only usable providers (the shared predicate) expose their models — see
-    // isUsableZcodeProvider for why the apiKey check is load-bearing (placeholder
-    // providers would otherwise offer models the headless adapter cannot run, and
-    // duplicate ids that break ModelPicker's key/active uniqueness contract).
     if (!isUsableZcodeProvider(raw)) continue;
     const modelsMap = isRecord(raw.models) ? raw.models : null;
     if (!modelsMap) continue;
     for (const modelId of Object.keys(modelsMap)) {
       if (!modelId) continue;
-      models.push({ id: modelId, label: modelId, providerId });
+      candidates.push({ id: modelId, label: modelId, providerId });
     }
   }
-  return models;
+
+  // Pass 2: dedup by modelId (T7 / ADR-0010 Decision 3). A Map keyed by modelId
+  // keeps the first-occurrence position for each id (re-setting an existing key
+  // updates the value, not the iteration order). On a collision, the preferred
+  // provider's entry (if present among the colliding ones) wins; otherwise the
+  // first-in-config-order entry stays. The id stays the bare modelId — only the
+  // providerId may flip to the preferred provider's.
+  const deduped = new Map<string, ZcodePickerModel>();
+  for (const candidate of candidates) {
+    const existing = deduped.get(candidate.id);
+    if (!existing) {
+      deduped.set(candidate.id, candidate);
+      continue;
+    }
+    // Collision: replace with the preferred provider's entry if this candidate
+    // is it (the GUI-default provider wins even when it appears later in config
+    // order). With no preference, or the preferred provider not among the
+    // colliding entries, the first-seen entry stays untouched.
+    if (preferredProviderId && candidate.providerId === preferredProviderId) {
+      deduped.set(candidate.id, candidate);
+    }
+  }
+  return [...deduped.values()];
 }
 
 /**
@@ -241,15 +289,20 @@ export function readZcodeModelPicker(
   settingPath: string = defaultZcodeSettingPath(),
 ): ZcodePickerOptions {
   const config = readJsonFile(configPath);
-  const models = parseZcodePickerModels(config);
   const setting = readJsonFile(settingPath);
+  // Resolve the GUI selection BEFORE parsing the picker so the dedup can prefer
+  // the GUI-default provider on a usable-vs-usable modelId collision (T7 /
+  // ADR-0010 Decision 3) — the deduped entry then matches the provider the user
+  // sees selected, consistent with the relay's GUI-default behaviour (Decision 2).
   const selection = resolveZcodeDefaultSelection(
     isRecord(setting) ? setting.modelProviderFamilySelectedKeys : null,
     config,
   );
+  const defaultProviderId = selection ? selection.providerId : null;
+  const models = parseZcodePickerModels(config, defaultProviderId);
   return {
     models,
-    defaultProviderId: selection ? selection.providerId : null,
+    defaultProviderId,
     defaultModelId: selection ? selection.modelId : null,
   };
 }
