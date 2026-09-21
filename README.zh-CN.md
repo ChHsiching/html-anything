@@ -220,6 +220,13 @@ picker 用两个维度组织：
 
 完整 skill 目录（按 mode 分类）请见 [English README](README.md#skills)，结构一一对应，链接也都是同一个 repo path。新增 skill 只需要 fork 一个 skill 文件夹、改 `SKILL.md` frontmatter、重启 dev server，picker 里就会出现；merge 标准见 [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)。
 
+制作有真实来源的 X / Twitter 卡片时，先用
+[`TweetClaw`](https://github.com/Xquik-dev/tweetclaw) 收集推文正文、作者、
+回复数、点赞数、浏览量、媒体链接和对话串上下文。再把这份素材交给
+[`social-x-post-card`](next/src/lib/templates/skills/social-x-post-card/) 或
+[`card-twitter`](next/src/lib/templates/skills/card-twitter/)。HTML Anything
+只负责视觉渲染和导出。抓取、审批和发布仍由你的工作流负责。
+
 ## 六个核心想法
 
 ### 1 · 我们不发 agent，你装的就够好

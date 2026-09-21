@@ -604,3 +604,17 @@ describe("resolveZcodeBin / resolveZcodeNodeBin Linux .deb install (T5 / ADR-001
     expect(resolveZcodeNodeBin()).toBe("/opt/ZCode/zcode");
   });
 });
+
+describe("detectAgents", () => {
+  it("includes the configured MiniMax Claude-compatible models in the Claude picker", () => {
+    const agents = detectAgents();
+    const claude = findAgent(agents, "claude");
+
+    expect(claude.models).toEqual(
+      expect.arrayContaining([
+        { id: "MiniMax-M3", label: "MiniMax-M3" },
+        { id: "MiniMax-M2.7", label: "MiniMax-M2.7" },
+      ]),
+    );
+  });
+});
