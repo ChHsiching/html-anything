@@ -11,18 +11,18 @@ import { readZcodeModelPicker } from "@html-anything/zcode-protocol/zcode-model-
  *   - "argv-message" : prompt goes via `--message <text>` (openclaw); stdout is
  *                      a single multi-line JSON document (not ndjson), parsed
  *                      after the child closes.
+ *   - "argv-attach"  : ZCode's headless one-shot CLI. The full prompt travels
+ *                      in a temp-file attachment (`--attach <file>`, written
+ *                      by the invoke layer), `-p` carries only a fixed short
+ *                      guide, and stdout is an NDJSON event stream
+ *                      (`--output-format stream-json`).
  *   - "acp"          : ACP JSON-RPC over stdio (hermes/kimi/devin/kiro/kilo/vibe).
  *                      Not implemented in this build — surfaced in detection so
  *                      the user sees install instructions, but invoke emits a
  *                      clear error pointing them to a supported agent.
  *   - "pi-rpc"       : pi's custom JSON-RPC mode. Same status as "acp".
- *   - "app-server"   : ZCode's `app-server` JSON-RPC-over-stdio protocol
- *                      (workspace/* + session/* methods). Distinct from "acp":
- *                      do not assume a shared parser. Surfaced in detection so
- *                      ZCode shows up in the picker; the invoke branch lands in
- *                      a later ticket (see ADR-0002 decision 2).
  */
-export type AgentProtocol = "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc" | "app-server";
+export type AgentProtocol = "stdin" | "argv" | "argv-message" | "argv-attach" | "acp" | "pi-rpc";
 
 /**
  * A model picker entry. `id`/`label` are the universal surface every agent's
@@ -59,7 +59,8 @@ export type AgentDef = {
   /**
    * Extra leading argv spliced between the bin and the protocol argv. Needed
    * for node-script CLIs (e.g. ZCode's `zcode.cjs`) that must be spawned as
-   * `node <resolvedCjsPath> app-server` rather than as a standalone exec.
+   * `node <resolvedCjsPath> -p …` rather than as a standalone exec — argv[1]
+   * has to be the cjs (a bare executable is rejected by Node as an arg).
    * Optional and defaults to absent, so existing adapters are unaffected.
    * See ADR-0002 decision 3.
    */
@@ -351,26 +352,28 @@ export const AGENTS: AgentDef[] = [
       { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
     ],
   },
-  // ZCode (Z.AI) — first app-server protocol agent. Unlike the agents above,
-  // its CLI is a node bundle (zcode.cjs) spawned as `node <cjs> app-server`,
-  // so bin: "node" and binArgs carries the node-script leading argv. The
-  // `<resolved-zcode-cjs>` sentinel is filled by resolveZcodeBin() at detect
-  // time (availability) and invoke time (the actual spawn). protocol
-  // "app-server" IS implemented (T6), so this entry is never marked
-  // unsupported — distinct from the acp/pi-rpc detection-only family above.
-  // fallbackModels is the static [DEFAULT_MODEL] floor: a live probe
-  // (ADR-0004 / #13) proved the child self-authenticates and resolves its own
-  // model, AND that no protocol method exposes a model list, so the picker
-  // only needs "Default (CLI config)" — send no --model, let the child's
-  // resolved entitlement win. See ADR-0002 decision 2.
+  // ZCode (Z.AI) — headless one-shot CLI agent (the only "argv-attach"
+  // protocol entry today). The CLI is a node bundle (zcode.cjs) spawned as
+  // `node <cjs> -p <guide> --attach <temp prompt file> --output-format
+  // stream-json --mode yolo`, so bin: "node" and binArgs carries just the
+  // resolved .cjs — argv[1] MUST be the cjs (a bare executable is rejected
+  // by Node as an arg). The `<resolved-zcode-cjs>` sentinel is filled by
+  // resolveZcodeBin() at detect time (availability) and invoke time (the
+  // actual spawn). Never marked unsupported — the adapter rides the generic
+  // invoke trunk like every argv-family agent.
+  //
+  // fallbackModels is the static [DEFAULT_MODEL] floor: the CLI has no
+  // --model flag, so the model default lives entirely in ZCode's own
+  // provider config. (detectAgents below still overlays the dynamic picker
+  // read while available; that surface is scheduled for removal.)
   {
     id: "zcode",
     label: "ZCode",
     bin: "node",
     envOverride: "ZCODE_BIN",
     vendor: "Z.AI",
-    protocol: "app-server",
-    binArgs: [ZCODE_CJS_SENTINEL, "app-server"],
+    protocol: "argv-attach",
+    binArgs: [ZCODE_CJS_SENTINEL],
     fallbackModels: [DEFAULT_MODEL],
   },
 ];
@@ -673,7 +676,7 @@ export function defaultZcodeCjsPaths(): string[] {
 }
 
 /**
- * Resolve the NODE binary that drives `node <zcode.cjs> app-server` for an
+ * Resolve the NODE binary that drives `node <zcode.cjs> -p …` for an
  * EXTERNAL caller (#12 / T12). `resolveZcodeBin()` above locates the `.cjs`
  * bundle; this locates the node the `.cjs` is run with — a distinct concern,
  * because html-anything is an external process and on a clean Windows host
@@ -685,10 +688,10 @@ export function defaultZcodeCjsPaths(): string[] {
  *      ELECTRON_RUN_AS_NODE env, and is the simplest portable driver.
  *   3. The ZCode Electron executable itself. On a clean host this is the ONLY
  *      node-like binary on the box; under `ELECTRON_RUN_AS_NODE=1` (merged into
- *      the spawn env by the app-server branch, #11) it behaves as node. A live
- *      `ZCode.exe <zcode.cjs> app-server` spawn with that env booted in ~1s and
- *      answered JSON-RPC frames on the probe host. No separate `node.exe`
- *      ships in the install tree (verified by walking it). See
+ *      the spawn env by envFor's zcode line) it behaves as node. A live
+ *      `ZCode.exe <zcode.cjs> …` spawn with that env booted in ~1s and ran the
+ *      CLI bundle on the probe host. No separate `node.exe` ships in the
+ *      install tree (verified by walking it). See
  *      {@link defaultZcodeElectronExePaths} for the per-platform exe locations.
  *
  * Returns a non-empty path (never `null`, never throws). Step 3 — the bundled
@@ -804,8 +807,8 @@ export type DetectedAgent = {
 export function detectAgents(): DetectedAgent[] {
   return AGENTS.map((a): DetectedAgent => {
     const protocol = a.protocol ?? "stdin";
-    // "app-server" (ZCode) is implemented in T6 — NOT unsupported, unlike
-    // the acp/pi-rpc family which is detection-only.
+    // "acp" / "pi-rpc" are detection-only; "argv-attach" (ZCode) is
+    // implemented on the generic invoke trunk — NOT unsupported.
     const unsupported = protocol === "acp" || protocol === "pi-rpc";
     const base = {
       id: a.id,
@@ -821,22 +824,22 @@ export function detectAgents(): DetectedAgent[] {
     // ZCODE_BIN, PATH, and platform defaults). The generic PATH branch below
     // would wrongly report `node` (bin) as the install, so ZCode gets its own
     // detection: available iff the .cjs resolves. resolvedBin is the node
-    // driver the spawn path will use (node <cjs> app-server): resolveZcodeNodeBin()
+    // driver the spawn path will use (node <cjs> -p …): resolveZcodeNodeBin()
     // (the real node or Electron-exe fallback). T15 (#18 / ADR-0005 decision 3)
     // tightened that resolver's return to `string` — the Electron-exe fallback
     // is terminal and present whenever detect passed (zcode.cjs found ⟺ ZCode
     // installed ⟺ exe exists), so there is no null to coalesce here.
     //
-    // #19 / ADR-0005 decision 4: the picker is populated DYNAMICALLY from
-    // ~/.zcode/v2/config.json when ZCode is available. The read is gated on
-    // the same availability (an unavailable install keeps the static
-    // [DEFAULT_MODEL] floor, so the picker never crashes on a missing config).
-    // readZcodeModelPicker() filters to enabled providers with no
-    // systemDisabledReason (the GUI's resolved, usable set) and returns each
-    // model with its providerId; DEFAULT_MODEL is prepended (= no `model` field
-    // → workspace default wins). model-providers.json is deliberately NOT
-    // read (static catalog with empty apiKeys → would offer unusable models).
-    if (protocol === "app-server") {
+    // The picker is still populated DYNAMICALLY from ~/.zcode/v2/config.json
+    // while ZCode is available (overlay scheduled for removal together with
+    // the protocol package). The read is gated on the same availability (an
+    // unavailable install keeps the static [DEFAULT_MODEL] floor, so the
+    // picker never crashes on a missing config). readZcodeModelPicker()
+    // filters to enabled providers with no systemDisabledReason (the GUI's
+    // resolved, usable set) and returns each model with its providerId.
+    // model-providers.json is deliberately NOT read (static catalog with
+    // empty apiKeys → would offer unusable models).
+    if (protocol === "argv-attach") {
       const cjs = resolveZcodeBin();
       if (cjs) {
         const { models: pickerModels } = readZcodeModelPicker();

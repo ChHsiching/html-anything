@@ -380,11 +380,11 @@ describe("detectAgents", () => {
   });
 
   describe("type-only extension surface (T2)", () => {
-    it("AgentProtocol accepts \"app-server\"", () => {
-      // Compile-time proof: if the union lacks "app-server" this assignment
-      // fails typecheck. The runtime echo just keeps the test meaningful.
-      const p: AgentProtocol = "app-server";
-      expect(p).toBe("app-server");
+    it("AgentProtocol accepts \"argv-attach\"", () => {
+      // Compile-time proof: if "argv-attach" is missing from the union this
+      // assignment fails typecheck. The runtime echo keeps the test meaningful.
+      const p: AgentProtocol = "argv-attach";
+      expect(p).toBe("argv-attach");
     });
 
     it("AgentDef accepts optional binArgs?: string[]", () => {
@@ -395,13 +395,12 @@ describe("detectAgents", () => {
         label: "Type Probe",
         bin: "type-probe",
         vendor: "probe",
-        protocol: "app-server",
-        binArgs: ["<resolved-cjs-path>", "app-server"],
+        protocol: "argv-attach",
+        binArgs: ["<resolved-cjs-path>"],
         fallbackModels: [DEFAULT_MODEL],
       };
       expect(withBinArgs.binArgs).toEqual([
         "<resolved-cjs-path>",
-        "app-server",
       ]);
     });
 
@@ -416,11 +415,11 @@ describe("detectAgents", () => {
       }
       expect(
         AGENTS.find((a) => a.id === "zcode")?.binArgs,
-      ).toEqual(["<resolved-zcode-cjs>", "app-server"]);
+      ).toEqual(["<resolved-zcode-cjs>"]);
     });
 
     it("detectAgents stays green across the existing protocol set", () => {
-      // Regression guard: the new "app-server" union member must not flip the
+      // Regression guard: the "argv-attach" union member must not flip the
       // unsupported flag for any of the protocols already in use.
       existsSyncMock.mockReturnValue(false);
       const agents = detectAgents();
@@ -553,15 +552,15 @@ describe("detectAgents", () => {
     });
   });
 
-  // T12: resolve the node binary that drives `node <zcode.cjs> app-server` for
+  // T12: resolve the node binary that drives `node <zcode.cjs> -p …` for
   // an EXTERNAL caller. html-anything is an external process; on a clean
   // Windows host `where node` finds nothing (only ZCode.exe exists). The
   // resolveZcodeBin() discovery above locates the .cjs bundle — this layer
   // locates the NODE the .cjs is run with. Strategy (chosen against a live
   // clean-host probe, not guessed): prefer a real node on PATH; fall back to
   // the ZCode Electron executable itself, which under ELECTRON_RUN_AS_NODE=1
-  // (set by the app-server spawn branch, #11) behaves as node. A live spawn of
-  // `ZCode.exe <zcode.cjs> app-server` with ELECTRON_RUN_AS_NODE=1 booted and
+  // (set by envFor's zcode line) behaves as node. A live spawn of
+  // `ZCode.exe <zcode.cjs> …` with ELECTRON_RUN_AS_NODE=1 booted and
   // answered JSON-RPC on this very host (no separate node.exe ships in the
   // install tree).
   describe("resolveZcodeNodeBin (T12)", () => {
@@ -662,8 +661,8 @@ describe("detectAgents", () => {
 
   // T7: ZCode is registered as a first-class agent. Unlike the *_BIN/PATH
   // agents, ZCode's availability is driven by resolveZcodeBin() (its CLI is a
-  // .cjs bundle, not a standalone exec found on PATH). protocol "app-server"
-  // is implemented (T5/T6), so it must NOT be marked unsupported.
+  // .cjs bundle, not a standalone exec found on PATH). protocol "argv-attach"
+  // is implemented (generic invoke trunk), so it must NOT be marked unsupported.
   describe("ZCode agent registration (T7)", () => {
     it("AGENTS contains a zcode entry with the spec fields", () => {
       const def = AGENTS.find((a) => a.id === "zcode");
@@ -671,12 +670,13 @@ describe("detectAgents", () => {
       expect(def!.label).toBe("ZCode");
       expect(def!.vendor).toBe("Z.AI");
       expect(def!.envOverride).toBe("ZCODE_BIN");
-      expect(def!.protocol).toBe("app-server");
+      expect(def!.protocol).toBe("argv-attach");
       expect(def!.bin).toBe("node");
-      // ADR-0002 decision 3: binArgs carries the node-script leading argv.
+      // ADR-0002 decision 3: binArgs carries the node-script leading argv —
+      // just the resolved .cjs (no subcommand anymore).
       // The <resolved-zcode-cjs> placeholder is filled at detect time from
       // resolveZcodeBin(); the literal here is the sentinel on the AgentDef.
-      expect(def!.binArgs).toEqual(["<resolved-zcode-cjs>", "app-server"]);
+      expect(def!.binArgs).toEqual(["<resolved-zcode-cjs>"]);
     });
 
     it("detectAgents() returns available=true when resolveZcodeBin() hits", () => {
@@ -699,9 +699,9 @@ describe("detectAgents", () => {
       // the dedicated resolveZcodeNodeBin cases above.
       expect(typeof zcode.resolvedBin).toBe("string");
       expect((zcode.resolvedBin ?? "").length).toBeGreaterThan(0);
-      expect(zcode.protocol).toBe("app-server");
-      // app-server IS implemented (T5/T6) — must not be flagged unsupported
-      // (unlike the acp/pi-rpc family).
+      expect(zcode.protocol).toBe("argv-attach");
+      // argv-attach IS implemented (generic invoke trunk) — must not be
+      // flagged unsupported (unlike the acp/pi-rpc family).
       expect(zcode.unsupported).toBeUndefined();
     });
 
@@ -740,7 +740,7 @@ describe("detectAgents", () => {
       expect(zcode.available).toBe(false);
       expect(zcode.path).toBeUndefined();
       expect(zcode.resolvedBin).toBeUndefined();
-      expect(zcode.protocol).toBe("app-server");
+      expect(zcode.protocol).toBe("argv-attach");
       expect(zcode.unsupported).toBeUndefined();
     });
 

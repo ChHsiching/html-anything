@@ -6,45 +6,19 @@
 // for a spawn/stdio unit test and matches how cli runs the same seam.
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 
-const { mockSpawn, existsSyncDelegate, mockReadZcodeConfig, mockReadZcodeConfigForProvider, mockReadZcodeModelPicker } = vi.hoisted(() => {
-  // #14 / #26: the saved provider config the workspace-default relay upserts.
-  // Shared by readZcodeConfig (the fallback) and readZcodeConfigForProvider
-  // (the GUI-default path in resolveWorkspaceModelConfig) so the relay succeeds
-  // without touching disk — the config reader is tested in the protocol pkg.
-  // A per-test "no usable provider" case must null BOTH mocks: resolveWorkspaceModelConfig
-  // tries the GUI provider first and only falls back to readZcodeConfig if that is null.
-  const defaultProviderConfig = {
-    provider: "builtin:bigmodel-coding-plan",
-    model: "GLM-5.2",
-    models: ["GLM-5.2"],
-    providerRecord: {
-      providerId: "builtin:bigmodel-coding-plan",
-      kind: "anthropic",
-      apiKey: { source: "inline", value: "test-key" },
-      models: [{ modelId: "GLM-5.2" }],
-      baseURL: "https://open.bigmodel.cn/api/anthropic",
-    },
-  };
+const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockRmSync } = vi.hoisted(() => {
   return {
     mockSpawn: vi.fn(),
     existsSyncDelegate: vi.fn((p: string) => p === "/bin/sh"),
-    mockReadZcodeConfig: vi.fn((): unknown => defaultProviderConfig),
-    mockReadZcodeConfigForProvider: vi.fn((): unknown => defaultProviderConfig),
-    // #19: the dynamic ZCode picker models returned by readZcodeModelPicker.
-    // Two enabled providers' models; the resolver picks the entry whose id
-    // matches opts.model. defaultProviderId is the selected provider, so the
-    // disambiguation test (model under two providers) resolves correctly.
-    mockReadZcodeModelPicker: vi.fn((): unknown => ({
-      models: [
-        { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
-        { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel-coding-plan" },
-        { id: "anthropic/claude-sonnet-4.5", label: "anthropic/claude-sonnet-4.5", providerId: "builtin:openrouter" },
-      ],
-      defaultProviderId: "builtin:bigmodel-coding-plan",
-      defaultModelId: "GLM-5.2",
-    })),
+    // argv-attach (zcode) prompt-delivery seam: the invoke layer mkdtemps a temp dir, writes prompt.md into it, and rmSyncs the dir on every exit
+    // path. Mocked so the tests assert the write/cleanup contract without
+    // touching the real temp filesystem.
+    mockMkdtempSync: vi.fn((prefix: string) => `${prefix}TEST`),
+    mockWriteFileSync: vi.fn(),
+    mockRmSync: vi.fn(),
   };
 });
 
@@ -55,33 +29,26 @@ vi.mock("node:child_process", async () => {
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
-  return { ...actual, existsSync: existsSyncDelegate };
+  return {
+    ...actual,
+    existsSync: existsSyncDelegate,
+    mkdtempSync: mockMkdtempSync,
+    writeFileSync: mockWriteFileSync,
+    rmSync: mockRmSync,
+  };
 });
-
-// #14: ensureWorkspaceModel reads the saved provider config. Mock it so the
-// invoke-layer tests don't touch disk; the config reader itself is tested in
-// the protocol package. #26: resolveWorkspaceModelConfig also calls
-// readZcodeConfigForProvider (the GUI-default path) — mock it too, or the relay
-// throws on the undefined export and every app-server turn fails.
-vi.mock("@html-anything/zcode-protocol/zcode-config", () => ({
-  readZcodeConfig: mockReadZcodeConfig,
-  readZcodeConfigForProvider: mockReadZcodeConfigForProvider,
-}));
-
-// #19: resolveZcodeTurnModel reads the dynamic picker models. Mock it so the
-// invoke-layer tests don't touch disk; the reader itself is tested in the
-// protocol package.
-vi.mock("@html-anything/zcode-protocol/zcode-model-picker", () => ({
-  readZcodeModelPicker: mockReadZcodeModelPicker,
-}));
 
 import { invokeAgent, type InvokeEvent } from "../invoke";
 
 function makeFakeChild() {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  // Capture stdin writes so the argv-attach tests can prove the prompt is
+  // NOT piped to stdin (it travels in the --attach temp file).
+  const stdinWrites: string[] = [];
   const stdin = new Writable({
-    write(_chunk: unknown, _enc: unknown, cb: () => void) {
+    write(chunk: unknown, _enc: unknown, cb: () => void) {
+      stdinWrites.push(typeof chunk === "string" ? chunk : String(chunk));
       cb();
     },
   });
@@ -93,7 +60,7 @@ function makeFakeChild() {
     pid: 99999,
   });
 
-  return { child, stdout, stderr, stdin };
+  return { child, stdout, stderr, stdin, stdinWrites };
 }
 
 async function collectStream(
@@ -107,75 +74,6 @@ async function collectStream(
     if (value) events.push(value);
   }
   return events;
-}
-
-/**
- * Script the fake app-server child: auto-respond to each JSON-RPC request
- * method on stdin with a canned result on stdout. Records every request method
- * seen on the wire so the relay-absence test (#13) can assert no
- * provider/workspace relay method is sent. Returns the child so the caller can
- * emit notifications / close afterwards.
- *
- * Mirrors the cli T5 test seam — see cli/src/__tests__/agents-invoke.test.ts.
- * The next app's app-server branch must behave identically.
- */
-function makeAppServerChild() {
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  const stdin = new Writable({
-    write(_chunk: unknown, _enc: unknown, cb: () => void) {
-      cb();
-    },
-  });
-  const child = Object.assign(new EventEmitter(), {
-    stdin,
-    stdout,
-    stderr,
-    pid: 4242,
-  });
-
-  const responses: Record<string, Record<string, unknown>> = {
-    "workspace/upsertModelProvider": { ok: true },
-    "workspace/setDefaultModel": { ok: true },
-    "session/create": { session: { sessionId: "sess-1" } },
-    "session/setMode": { ok: true },
-    "session/subscribe": { ok: true },
-    "session/send": { ok: true },
-  };
-
-  // Every request method seen on the wire, in order.
-  const sentMethods: string[] = [];
-  // Every parsed request frame seen on the wire, in order: { id, method, params }.
-  // Captures the full params so the #19 model-threading tests can assert what
-  // session/create carries (model present vs absent).
-  const sentFrames: { id?: string; method?: string; params?: Record<string, unknown> }[] = [];
-
-  // Tap stdin to auto-respond. The protocol client writes one JSON object
-  // per line; we parse and reply on stdout.
-  stdin.write = ((chunk: unknown) => {
-    const text = typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8");
-    for (const line of text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let frame: { id?: string; method?: string; params?: Record<string, unknown> };
-      try {
-        frame = JSON.parse(trimmed);
-      } catch {
-        continue;
-      }
-      if (typeof frame.method === "string" && typeof frame.id === "string") {
-        sentMethods.push(frame.method);
-        sentFrames.push(frame);
-        const result = responses[frame.method];
-        if (result) {
-          stdout.write(`${JSON.stringify({ id: frame.id, result })}\n`);
-        }
-      }
-    }
-    return true;
-  }) as typeof stdin.write;
-
-  return { child, stdout, stderr, stdin, sentMethods, sentFrames };
 }
 
 /**
@@ -202,110 +100,135 @@ function makeMountChild(mountPoint: string, write = true) {
   return { child, stdout, stderr };
 }
 
-// On win32 next quotes the bin and runs through a shell; on *nix it passes
-// the bin verbatim. Tests must accept whichever the host platform produces.
-const USE_SHELL = process.platform === "win32";
 const BIN_OVERRIDE = "/bin/sh";
 
-describe("invokeAgent — app-server protocol branch (ZCode)", () => {
+// Real NDJSON lines captured from the installed ZCode CLI (3.14.1 desktop
+// bundle, zcode 0.16.9) running `-p … --output-format stream-json --mode
+// yolo` headless. The adapter's parser and invoke plumbing are pinned against
+// these real bytes, not a hand-written sketch. Source probe artifact:
+// .scratch/zcode-opensource/probe-cli-oneshot/streamcheck-stdout.jsonl
+// (captured 2026-09-22). Includes the full noise vocabulary observed on a
+// single turn: session.titleUpdated / session.resumed / session.updated
+// (plugin hook descriptors), turn.started, the model.streaming kinds, the
+// turn.completed envelope, and the bare result terminator line.
+const ZCODE_STREAM_JSON = String.raw`{"eventId":"ba62ed88-8c55-4431-83ca-32a57b0b2395","payload":{"previousTitle":"","source":"first_input","title":"Reply with exactly the token: PROBE_OK"},"seq":1,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034226,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.titleUpdated"}
+{"eventId":"081fe5f4-0d82-493a-be2d-fb69dff0168f","payload":{"directory":"C:\\Users\\Administrator\\Git\\html-anything","interruptedToolCount":0,"messageCount":15,"partCount":31,"recoveredCompactTimelineCount":0,"recoveredSteerInputCount":0,"resumedTodoCount":0},"seq":2,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034228,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.resumed"}
+{"eventId":"704f78d3-0c2d-4566-afd8-c94f6f0906c6","payload":{"descriptor":{"clientVisible":true,"commandDisplay":"node \"C:\\Users\\Administrator\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1/hooks/session-start-seen-skills.mjs\"","executionMode":"foreground","executionType":"command","pluginId":"vercel@claude-plugins-official","pluginName":"vercel","sourceKind":"plugin","sourcePath":"C:\\Users\\Administrator\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1\\hooks\\hooks.json","timeoutMs":60000},"hookEventName":"SessionStart","hookIndex":0,"hookCount":4,"hookInvocationId":"b5547636-0e41-4c9b-b95d-32941f50b6aa","hookRunId":"4699df10-ce5a-42c2-bfde-f7213e1a95a6","hookSource":"plugin.vercel@claude-plugins-official.SessionStart.1.0","matcher":"startup|resume|clear|compact","startedAt":1790039034230},"seq":3,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034230,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.updated"}
+{"eventId":"2bf2eb12-0196-4448-9546-fa9bdbbdfd2e","payload":{"executionStartedAt":1790039035583.7253,"turnNumber":7,"input":"Reply with exactly the token: PROBE_OK","messageId":"msg_mubz0vk6_f9084d10-58cb-4fb2-b226-98373bfe8cec","foregroundExecutionId":"runtime_command_1","queryId":"query_cf24b136-0c0f-4afc-a83d-ced3669c001a"},"seq":11,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039035590,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"turn.started"}
+{"eventId":"dbd9ae00-db4f-4710-ae4b-c4b66ee1600f","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"","done":false,"kind":"start"},"seq":20,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046426,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
+{"eventId":"2dee4cce-ca91-4521-95e3-b4b68ceaf5d39","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"","done":false,"kind":"text_start"},"seq":21,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046426,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
+{"eventId":"d20d9e75-af8b-4d70-8b12-750a98416233","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"PRO","done":false,"kind":"text_delta"},"seq":22,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046427,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
+{"eventId":"70e217a9-3d1a-49d0-9049-8411f226dff5","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"BE","done":false,"kind":"text_delta"},"seq":23,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046428,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
+{"eventId":"43884742-953d-4b45-8496-7e5773bc9996","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"_OK","done":false,"kind":"text_delta"},"seq":24,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046428,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
+{"eventId":"005c69cb-1785-447f-8f42-6ab57ac111a8","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"","done":false,"kind":"text_end"},"seq":25,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046429,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
+{"eventId":"84413ce1-a3ef-49af-864b-4a81605d8e2f","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"","done":true,"kind":"finish"},"seq":26,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046429,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
+{"eventId":"af34daea-c765-4083-9fa5-2f88eba64782","payload":{"response":"PROBE_OK","tokenCount":134374,"usage":{"source":"provider","modelRequestCount":1,"inputTokens":134370,"outputTokens":4,"totalTokens":134374,"cacheReadTokens":64,"cacheWriteTokens":0,"reasoningTokens":1,"webFetchRequests":0,"webSearchRequests":0},"toolCallCount":0,"historyRoundCount":1,"duration":11229,"resultType":"success","cacheStats":{"totalMessages":23,"cachedMessages":22,"lastCacheHit":true,"cacheReadTokens":64}},"seq":33,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046811,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"turn.completed"}
+{"type":"result","sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","response":"PROBE_OK","usage":{"source":"provider","modelRequestCount":1,"inputTokens":134370,"outputTokens":4,"totalTokens":134374,"cacheReadTokens":64,"cacheWriteTokens":0,"reasoningTokens":1,"webFetchRequests":0,"webSearchRequests":0},"eventCount":13,"projection":{"status":"idle","turnCount":1,"totalTokenCount":134374,"contextUsed":134374,"contextWindow":200000}}`;
+
+function zcodeLines(): string[] {
+  return ZCODE_STREAM_JSON.split("\n").filter((l) => l.trim());
+}
+
+describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
   beforeEach(() => {
-    // Make resolveZcodeBin() return the test .cjs path so the binArgs
-    // sentinel resolves to it (T7 invoke-time substitution). ZCode is now
-    // registered in AGENTS (T7); no temporary def push is needed.
+    // resolveZcodeBin() must return the test .cjs so the binArgs sentinel
+    // resolves to it (invoke-time substitution). The resolved node driver is
+    // an absolute `.exe`-style path, so the spawn takes the DIRECT (no-shell)
+    // Windows path — argv passes verbatim on every host platform.
     vi.stubEnv("ZCODE_BIN", "/resolved/zcode.cjs");
-    // The app-server bin is an absolute path ("/resolved/node"); let the
-    // mocked existsSync accept it so resolveBinForAgent succeeds. Also
-    // accept the ZCODE_BIN path so resolveZcodeBin's first probe hits.
     existsSyncDelegate.mockImplementation((p: string) =>
-      p === "/resolved/node" ||
+      p === "/resolved/node.exe" ||
       p === "/resolved/zcode.cjs" ||
       p === "/bin/sh",
     );
     mockSpawn.mockReset();
+    mockMkdtempSync.mockClear();
+    mockWriteFileSync.mockClear();
+    mockRmSync.mockClear();
   });
   afterEach(() => {
     vi.unstubAllEnvs();
     existsSyncDelegate.mockImplementation((p: string) => p === "/bin/sh");
   });
 
-  it("spawns via binArgs as `node <cjs> app-server` and reports start.argv", async () => {
-    const { child, stdout } = makeAppServerChild();
+  const attachDir = () => mockMkdtempSync.mock.results[0]?.value as string;
+  const attachFile = () => path.join(attachDir(), "prompt.md");
+
+  it("spawns `node <cjs> -p <guide> --attach <tmp> --output-format stream-json --mode yolo` and reports start.argv", async () => {
+    const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "build it",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 0));
     const eventsPromise = collectStream(stream);
 
-    // Emit a final-result usage so the turn ends → {type:"done"}.
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
+    stdout.write(`${zcodeLines().join("\n")}\n`);
     stdout.end();
     await new Promise((r) => setImmediate(r));
     child.emit("close", 0);
 
     const events = await eventsPromise;
 
-    // spawn called with bin (quoted on win32) + binArgs (no prompt on argv).
-    // On win32 next runs the child through a shell, so every argv element is
-    // quoted (quoteWindowsArg) — matching cli's app-server branch. argv never
-    // carries the prompt; binArgs carries [ZCODE_CJS_SENTINEL, "app-server"].
-    expect(mockSpawn).toHaveBeenCalledWith(
-      USE_SHELL ? `"/resolved/node"` : "/resolved/node",
-      USE_SHELL
-        ? [`"/resolved/zcode.cjs"`, `"app-server"`]
-        : ["/resolved/zcode.cjs", "app-server"],
-      expect.objectContaining({ stdio: ["pipe", "pipe", "pipe"] }),
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const [spawnBin, spawnArgv, spawnOpts] = mockSpawn.mock.calls[0] as unknown as [
+      string,
+      string[],
+      Record<string, unknown>,
+    ];
+    // Absolute `.exe` bin → DIRECT spawn on win32 (no cmd.exe), plain spawn
+    // elsewhere: argv elements verbatim on every host — spaced install paths
+    // survive with no quoting games.
+    expect(spawnBin).toBe("/resolved/node.exe");
+    expect(spawnOpts.shell ?? false).toBeFalsy();
+    // argv[0] is the resolved .cjs (argv[1] of the real process; a bare
+    // executable would be rejected by Node as an arg) — never `app-server`.
+    expect(spawnArgv[0]).toBe("/resolved/zcode.cjs");
+    expect(spawnArgv).not.toContain("app-server");
+    const pIdx = spawnArgv.indexOf("-p");
+    expect(pIdx).toBe(1);
+    // `-p` carries the fixed short guide, NOT the prompt.
+    expect(spawnArgv[pIdx + 1]).not.toBe("build it");
+    expect(spawnArgv[pIdx + 1]!.length).toBeLessThan(200);
+    // The prompt travels as the --attach temp file.
+    const aIdx = spawnArgv.indexOf("--attach");
+    expect(aIdx).toBeGreaterThan(-1);
+    expect(spawnArgv[aIdx + 1]).toBe(attachFile());
+    expect(spawnArgv).toEqual(
+      expect.arrayContaining(["--output-format", "stream-json", "--mode", "yolo"]),
     );
 
     const start = events.find((e) => e.type === "start");
     expect(start).toMatchObject({
       type: "start",
-      bin: "/resolved/node",
-      argv: ["/resolved/zcode.cjs", "app-server"],
+      bin: "/resolved/node.exe",
+      argv: spawnArgv,
     });
   });
 
-  // ADR-0004 / T9: without ELECTRON_RUN_AS_NODE=1 the zcode.cjs child hangs
-  // at Electron-component init. The env must be merged INTO envFor(...) (so
-  // the rest of the process env survives), not replace it. spawn is mocked,
-  // so this pins the fact without a real server. Mirrors the cli test seam.
   it("spawns with ELECTRON_RUN_AS_NODE=1 merged into the env", async () => {
-    const { child, stdout } = makeAppServerChild();
+    const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "build it",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 0));
     const eventsPromise = collectStream(stream);
-
-    // End the turn so the stream closes.
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
     stdout.end();
     await new Promise((r) => setImmediate(r));
     child.emit("close", 0);
-
     await eventsPromise;
 
     expect(mockSpawn).toHaveBeenCalledWith(
-      USE_SHELL ? `"/resolved/node"` : "/resolved/node",
+      "/resolved/node.exe",
       expect.any(Array),
       expect.objectContaining({
         env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
@@ -313,964 +236,133 @@ describe("invokeAgent — app-server protocol branch (ZCode)", () => {
     );
   });
 
-  it("bridges a text_delta notification to {type:'delta'}", async () => {
-    const { child, stdout } = makeAppServerChild();
+  it("bridges model.streaming text_delta lines to {type:'delta'} and safely drops noise lines", async () => {
+    const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "hi",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 0));
     const eventsPromise = collectStream(stream);
 
-    // Stream a text_delta, then end the turn with a final-result usage.
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { kind: "text_delta", delta: "hello " } },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { kind: "text_delta", delta: "world" } },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 5 } } },
-      })}\n`,
-    );
+    stdout.write(`${ZCODE_STREAM_JSON}\n`);
     stdout.end();
     await new Promise((r) => setImmediate(r));
     child.emit("close", 0);
 
     const events = await eventsPromise;
     const deltas = events.filter((e) => e.type === "delta");
-    expect(deltas.map((d) => (d as { text: string }).text).join("")).toBe("hello world");
+    expect(deltas.map((d) => (d as { text: string }).text)).toEqual(["PRO", "BE", "_OK"]);
+    // Noise envelope lines (session.updated hook frames …), turn.completed,
+    // and the bare result terminator produce NOTHING — dropped, not forwarded
+    // as raw / meta / error events.
+    expect(events.filter((e) => e.type === "raw")).toEqual([]);
+    expect(events.filter((e) => e.type === "meta")).toEqual([]);
+    expect(events.filter((e) => e.type === "error")).toEqual([]);
+    expect(events[events.length - 1]).toMatchObject({ type: "done", code: 0 });
   });
 
-  it("rescues HTML from a write tool_use → {type:'html'}", async () => {
-    const { child, stdout } = makeAppServerChild();
+  it("writes the full prompt to the attach temp file — not on argv, not on stdin", async () => {
+    const { child, stdout, stdinWrites } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
-      prompt: "make a page",
-      binOverride: "/resolved/node",
+      prompt: "FULL PROMPT BODY",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 0));
     const eventsPromise = collectStream(stream);
-
-    const html = "<html><body>from tool</body></html>";
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: {
-          payload: {
-            kind: "tool_call",
-            toolCallId: "t1",
-            toolName: "write",
-            input: { file_path: "out.html", content: html },
-          },
-        },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-
-    const events = await eventsPromise;
-    const htmls = events.filter((e) => e.type === "html");
-    expect(htmls).toHaveLength(1);
-    expect((htmls[0] as { text: string }).text).toBe(html);
-  });
-
-  // #21 / spec #20 N1: a non-HTML tool_use (e.g. WebSearch) is forwarded as a
-  // {type:"meta", key:"status"} event so the SSE stream emits bytes during the
-  // model's tool window instead of freezing the UI. The HTML-rescue branch
-  // (above) is unchanged — only the previously-dropped fallthrough now emits a
-  // meta. The meta key is adapter-internal naming; the frontend ignores meta
-  // today, so this is a no-op for the UI until a future spec surfaces it.
-  it("forwards a non-HTML tool_use as a meta status event (#21)", async () => {
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "search the web",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    // A tool_call whose name is not a write tool → no HTML rescue → meta.
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: {
-          payload: {
-            kind: "tool_call",
-            toolCallId: "ws1",
-            toolName: "WebSearch",
-            input: { query: "Matt Pocock Skills" },
-          },
-        },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-
-    const events = await eventsPromise;
-    const statusMetas = events.filter(
-      (e) => e.type === "meta" && (e as { key?: string }).key === "status",
-    );
-    expect(statusMetas).toHaveLength(1);
-    expect(statusMetas[0]).toMatchObject({
-      type: "meta",
-      key: "status",
-      value: "调用工具 WebSearch",
-    });
-    // A non-HTML tool_use must NOT also emit an html event.
-    expect(events.some((e) => e.type === "html")).toBe(false);
-  });
-
-  // #21: tool_result carries a tool name — either on the event itself (the
-  // protocol stream reads it from the frame's `toolName` field) or recovered
-  // from the preceding tool_use via the Map fallback. When neither yields a
-  // name (e.g. an orphan result whose id was never seen), emit NOTHING — a
-  // nameless status line ("✓") is noise worse than no line at all.
-  it("forwards a tool_result as a meta status event with the carried tool name (#21)", async () => {
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "search the web",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    // tool_use first (registers the name under its id), then the matching
-    // result, then an orphan result with an untracked id, then end the turn.
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: {
-          payload: {
-            kind: "tool_call",
-            toolCallId: "ws1",
-            toolName: "WebSearch",
-            input: { query: "x" },
-          },
-        },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: {
-          payload: {
-            kind: "result",
-            toolCallId: "ws1",
-            result: { content: [{ type: "text", text: "hits" }], success: true },
-          },
-        },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: {
-          payload: {
-            kind: "result",
-            toolCallId: "orphan",
-            result: { content: [], success: true },
-          },
-        },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-
-    const events = await eventsPromise;
-    const statusMetas = events
-      .filter((e) => e.type === "meta" && (e as { key?: string }).key === "status")
-      .map((e) => (e as { value?: unknown }).value);
-    // tool_use meta (调用工具) + matched result meta (工具 …完成, name resolved
-    // via Map fallback since this `result` frame has no toolName). The orphan
-    // result (id never seen, no toolName) emits NOTHING — no nameless status.
-    expect(statusMetas).toEqual(["调用工具 WebSearch", "工具 WebSearch 完成"]);
-  });
-
-  // #25 (supersedes ADR-0006 Decision 1): the model's reasoning stream is now
-  // FORWARDED as {type:"meta", key:"thinking"} — the exact event shape the
-  // Claude Code argv path emits and `formatMeta` renders as `thinking …`. A
-  // live comparison (hsiarch, 2026-08-12) showed Claude streams the same
-  // per-fragment thinking lines and that continuous flow is good UX; ZCode was
-  // a black box only because this layer dropped it. The prior #21 test
-  // asserted the drop; this test asserts the forwarding.
-  //
-  // Wire note: the stream handler maps an inbound payload with
-  // `kind:"reasoning_delta"` → onEvent({type:"thinking_start"}) once, then
-  // onEvent({type:"thinking_delta", delta}). So the reasoning fragments MUST
-  // be written as `reasoning_delta` payloads; a `kind:"thinking_delta"` payload
-  // matches no branch and is dropped before onEvent (see test (c) of the #22
-  // block for the same gotcha).
-  it("forwards reasoning_delta as a meta thinking event per fragment (#25)", async () => {
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "think hard",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { kind: "reasoning_delta", delta: "reasoning..." } },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { kind: "reasoning_delta", delta: "more..." } },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-
-    const events = await eventsPromise;
-    // Each reasoning_delta fragment → one {type:"meta", key:"thinking"} event
-    // carrying the fragment as its value (matching Claude's argv path shape).
-    const thinkingMetas = events.filter(
-      (e) => e.type === "meta" && (e as { key?: string }).key === "thinking",
-    );
-    expect(thinkingMetas.map((m) => (m as { value?: unknown }).value)).toEqual([
-      "reasoning...",
-      "more...",
-    ]);
-    // thinking_start (fired once before the first fragment) carries no payload
-    // and is ignored — it must NOT produce an empty/garbage meta line.
-    const allMetas = events.filter((e) => e.type === "meta");
-    expect(allMetas.map((m) => (m as { key?: string }).key)).toEqual([
-      "thinking",
-      "thinking",
-      "usage",
-    ]);
-    // HTML / formal output is unaffected — reasoning travels its own channel;
-    // no html or delta events mix in.
-    expect(events.some((e) => e.type === "html")).toBe(false);
-    expect(events.some((e) => e.type === "delta")).toBe(false);
-  });
-
-  // #25 follow-up: ZCode generates a conversation title (source:"generated");
-  // the protocol layer surfaces it as a conversation_title event. Forward as a
-  // meta so it isn't silently dropped. Uses the existing `meta` type (no union
-  // change); formatMeta's generic fallback renders `conversation_title: <t>`.
-  it("forwards conversation_title as a meta event (#25 follow-up)", async () => {
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    // source:"generated" title → conversation_title event (a first_input title
-    // without source:"generated" is dropped by the protocol layer, not here).
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { title: "闭包小课", source: "generated" } },
-      })}\n`,
-    );
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-
-    const events = await eventsPromise;
-    const titleMetas = events.filter(
-      (e) => e.type === "meta" && (e as { key?: string }).key === "conversation_title",
-    );
-    expect(titleMetas).toHaveLength(1);
-    expect(titleMetas[0]).toMatchObject({
-      type: "meta",
-      key: "conversation_title",
-      value: "闭包小课",
-    });
-  });
-
-  it("final-result usage → {type:'done', code:0}", async () => {
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 2 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-
-    const events = await eventsPromise;
-    const done = events.filter((e) => e.type === "done");
-    expect(done).toHaveLength(1);
-    expect(done[0]).toMatchObject({ type: "done", code: 0 });
-  });
-
-  it("turn driver rejection (session/create error) → {type:'error'}", async () => {
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    // Override the stdin tap to make session/create return a JSON-RPC error,
-    // which the protocol client surfaces as a rejected request → the turn
-    // driver rejects → invokeAgent emits {type:"error"}.
-    child.stdin.write = ((chunk: unknown) => {
-      const text = typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8");
-      for (const line of text.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        let frame: { id?: string; method?: string };
-        try {
-          frame = JSON.parse(trimmed);
-        } catch {
-          continue;
-        }
-        if (typeof frame.method === "string" && typeof frame.id === "string") {
-          if (frame.method === "session/create") {
-            stdout.write(
-              `${JSON.stringify({ id: frame.id, error: { code: -32603, message: "no session" } })}\n`,
-            );
-          } else {
-            stdout.write(`${JSON.stringify({ id: frame.id, result: { ok: true } })}\n`);
-          }
-        }
-      }
-      return true;
-    }) as typeof child.stdin.write;
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 1);
-
-    const events = await eventsPromise;
-    const errors = events.filter((e) => e.type === "error");
-    expect(errors.length).toBeGreaterThanOrEqual(1);
-    expect((errors[0] as { message: string }).message).toContain("no session");
-  });
-
-  // ADR-0004 + #14 (live-probe-corrected): the app-server child self-auths
-  // the LOGIN, but a fresh session/create needs the workspace model configured
-  // first (#13 wrongly deleted this relay; #14 live probes disproved the
-  // assumption). So the adapter runs the once-per-boot model relay
-  // (upsertModelProvider → setDefaultModel) BEFORE the turn. Mirrors the cli
-  // test seam; pins the full wire sequence including the relay.
-  it("relays the once-per-boot model config (upsert→setDefault) before the turn", async () => {
-    const { child, stdout, sentMethods } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    // End the turn so the wire capture is complete.
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-
-    await eventsPromise;
-
-    // The relay runs first, then the turn. Assert the exact full sequence.
-    expect(sentMethods).toEqual([
-      "workspace/upsertModelProvider",
-      "workspace/setDefaultModel",
-      "session/create",
-      "session/subscribe",
-      "session/send",
-    ]);
-  });
-
-  it("emits {type:'error'} and does not create when no usable provider is configured", async () => {
-    // #26: resolveWorkspaceModelConfig tries the GUI-default provider first
-    // (readZcodeConfigForProvider) and only falls back to readZcodeConfig if
-    // that is null — so the no-usable-provider case must null BOTH, or the
-    // GUI path would rescue the turn and no error would fire.
-    mockReadZcodeConfigForProvider.mockReturnValueOnce(null);
-    mockReadZcodeConfig.mockReturnValueOnce(null);
-    const { child } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const events = await collectStream(stream);
-
-    const error = events.find((e) => e.type === "error");
-    expect(error).toBeDefined();
-    expect((error as { message?: string }).message).toMatch(/no usable ZCode provider/i);
-  });
-
-  // T12 (#12): external-process node resolution. On a clean host `where node`
-  // finds nothing — only the ZCode Electron executable exists. When no
-  // binOverride is passed and no system `node` is on PATH, the app-server
-  // branch must resolve the bin via resolveZcodeNodeBin() (which discovers the
-  // Electron exe), NOT fail with "not installed". ZCODE_BIN stays scoped to the
-  // .cjs (not overloaded as the node bin).
-  it("falls back to the ZCode Electron exe when node is not on PATH (T12)", async () => {
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-    existsSyncDelegate.mockImplementation((p: string) =>
-      p === "/resolved/zcode.cjs" ||
-      p === "C:\\Program Files\\ZCode\\ZCode.exe" ||
-      p === "/bin/sh",
-    );
-    vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "C:\\Program Files\\ZCode");
-    // This test forces win32, so assert the win32 spawn shape UNCONDITIONALLY.
-    // The module-level USE_SHELL is evaluated once at import from the REAL host,
-    // so branching on it makes the assertion host-dependent: on Linux/macOS CI
-    // USE_SHELL is false (expects the unquoted path) but production quotes it
-    // under the stubbed win32 → the test fails CI. Restore the platform in
-    // finally so later tests in this file don't inherit win32.
-    const originalPlatform = process.platform;
-    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-    try {
-      const stream = invokeAgent({ agent: "zcode", prompt: "build it" });
-
-      await new Promise((r) => setTimeout(r, 0));
-      const eventsPromise = collectStream(stream);
-      stdout.write(
-        `${JSON.stringify({
-          method: "session/event",
-          params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-        })}\n`,
-      );
-      stdout.end();
-      await new Promise((r) => setImmediate(r));
-      child.emit("close", 0);
-      await eventsPromise;
-
-      // The decisive assertion: spawn was called with the Electron exe as bin,
-      // quoted + shell:true on win32 (the path contains a space; cmd.exe resolves
-      // the .exe). Asserted unconditionally because this test forces win32.
-      expect(mockSpawn).toHaveBeenCalledWith(
-        `"C:\\Program Files\\ZCode\\ZCode.exe"`,
-        expect.any(Array),
-        expect.objectContaining({
-          env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: "1" }),
-          shell: true,
-        }),
-      );
-    } finally {
-      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
-    }
-  });
-
-  // T15 (#18 / ADR-0005 decision 3): the "no node AND no Electron exe" error
-  // path was REMOVED — it was unreachable. detectAgents() reports zcode
-  // available only when zcode.cjs was found ⟺ ZCode is installed ⟺ the
-  // sibling Electron exe exists, so resolveZcodeNodeBin() always hits its
-  // terminal fallback for any caller that reached this code. There is no
-  // error branch left to test; the absence is a static assertion (grep for
-  // the message string is gone). The T12 fallback case above remains the
-  // pin for the real spawn path.
-
-  // #19 / ADR-0005 decision 4: a non-default model pick is plumbed through to
-  // session/create as model:{providerId, modelId}. Live-proven the server
-  // accepts this nested object and binds it to the session for every turn.
-  it("carries model:{providerId, modelId} on session/create for a non-default model pick", async () => {
-    const { child, stdout, sentFrames } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-      model: "GLM-5-Turbo",
-    });
-
-    await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
-
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
     stdout.end();
     await new Promise((r) => setImmediate(r));
     child.emit("close", 0);
     await eventsPromise;
 
-    const create = sentFrames.find((f) => f.method === "session/create");
-    expect(create).toBeDefined();
-    // model is the picked modelId + the providerId the resolver recovered from
-    // the dynamic picker list (bigmodel-coding-plan owns defaultModelId
-    // GLM-5.2, so GLM-5-Turbo resolves under that provider).
-    expect(create!.params).toMatchObject({
-      workspace: expect.any(Object),
-      model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5-Turbo" },
-    });
+    expect(mockMkdtempSync).toHaveBeenCalledTimes(1);
+    expect(mockWriteFileSync).toHaveBeenCalledWith(attachFile(), "FULL PROMPT BODY", "utf8");
+    expect(stdinWrites.join("")).not.toContain("FULL PROMPT BODY");
   });
 
-  // #19: the default model pick (or absent) carries NO model field — the
-  // workspace default (provisioned by the once-per-boot relay) applies. This
-  // is the unchanged pre-#19 behaviour, asserted explicitly so a regression
-  // that always sends model is caught.
-  it("omits model from session/create for the default model pick", async () => {
-    const { child, stdout, sentFrames } = makeAppServerChild();
+  it("removes the attach temp dir on normal close", async () => {
+    const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
-      // model omitted (undefined) → "default" path
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 0));
     const eventsPromise = collectStream(stream);
-
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
     stdout.end();
     await new Promise((r) => setImmediate(r));
     child.emit("close", 0);
     await eventsPromise;
 
-    const create = sentFrames.find((f) => f.method === "session/create");
-    expect(create).toBeDefined();
-    expect(create!.params).not.toHaveProperty("model");
+    expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
   });
 
-  // #19: when the same model id exists under MULTIPLE enabled providers, the
-  // resolver prefers the GUI's selected provider (defaultProviderId). GLM-5.2
-  // appears under both builtin:bigmodel and builtin:bigmodel-coding-plan here;
-  // defaultProviderId is the coding-plan, so the create frame must bind to it
-  // — NOT the first-listed bigmodel. This falsifies the disambiguation branch.
-  it("prefers the selected provider when the picked model id is ambiguous across providers", async () => {
-    mockReadZcodeModelPicker.mockReturnValueOnce({
-      models: [
-        { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel" },
-        { id: "GLM-5-Turbo", label: "GLM-5-Turbo", providerId: "builtin:bigmodel" },
-        { id: "GLM-5.2", label: "GLM-5.2", providerId: "builtin:bigmodel-coding-plan" },
-      ],
-      defaultProviderId: "builtin:bigmodel-coding-plan",
-      defaultModelId: "GLM-5.2",
-    });
-    const { child, stdout, sentFrames } = makeAppServerChild();
+  it("removes the attach temp dir when the child errors", async () => {
+    const { child } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
-      model: "GLM-5.2", // ambiguous: under bigmodel AND bigmodel-coding-plan
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 0));
-    const eventsPromise = collectStream(stream);
+    child.emit("error", new Error("spawn ENOENT"));
+    await collectStream(stream);
 
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await new Promise((r) => setImmediate(r));
-    child.emit("close", 0);
-    await eventsPromise;
-
-    const create = sentFrames.find((f) => f.method === "session/create");
-    expect(create).toBeDefined();
-    // The selected provider (owns defaultModelId GLM-5.2) is coding-plan, NOT
-    // the first-listed bigmodel — the resolver's disambiguation must pick it.
-    expect(create!.params).toMatchObject({
-      model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" },
-    });
+    expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
   });
 
-  // ─── #22 / spec #20 N2: turn-silence timeout ───────────────────────────
-  //
-  // The post-`session/send` window is the only unbounded await in the turn.
-  // #22 installs a 180s SILENCE timer (not a hard turn cap): it arms after the
-  // turn driver resolves and resets on EVERY onEvent call (including the
-  // dropped thinking_delta — the model's "I'm still alive" signal during deep
-  // reasoning), so legitimately long agentic turns keep running as long as
-  // events keep arriving. Only 180s of ZERO events fires an error + finish(1).
-  //
-  // The four tests below use vi.useFakeTimers() so the 180s clock is advanced
-  // instantly. The fake timers do NOT intercept process.nextTick / PassThrough
-  // 'data' delivery, so the protocol client's request/response cycle (and the
-  // resulting onEvent calls) still drain naturally — we only advance the
-  // silence clock, not the microtask queue. afterEach restores real timers so
-  // sibling tests (real setTimeout(0) flush) are unaffected.
-  //
-  // Helper: drain microtasks + nextTick WITHOUT advancing fake timers. The
-  // async start() runs through ensureWorkspaceModel (2 reqs) +
-  // startZcodeProtocolTurn (3 reqs) + the silence-timer arm; each await yields
-  // at a microtask boundary and the mock child's responses arrive on the next
-  // PassThrough 'data' event (a real nextTick under fake timers). Iterating a
-  // bounded number of times is enough to complete the whole chain.
-
-  const flushMicrotasks = async (iterations = 200) => {
-    for (let i = 0; i < iterations; i++) {
-      await Promise.resolve();
-      await new Promise((r) => process.nextTick(r));
-    }
-  };
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  // (a) Slow-but-alive: a turn that emits thinking_delta at t=0 and t=179s,
-  // then usage at t=200s, completes with done code 0 and NO silence-error.
-  // This proves long-thinking turns are not falsely aborted — the resets keep
-  // the timer alive across the full 200s. thinking_delta is the weakest signal
-  // (it's dropped from the InvokeEvent surface) but still resets the clock.
-  //
-  // NOTE on the wire shape: the stream handler maps an inbound payload with
-  // `kind:"reasoning_delta"` → onEvent({type:"thinking_delta"}). So the
-  // liveness event is produced by writing a `reasoning_delta` payload; a
-  // `kind:"thinking_delta"` payload would match no branch and be dropped (no
-  // onEvent call → no reset), which is the opposite of what this test wants.
-  it("does not abort a slow-but-alive turn that keeps emitting events (#22)", async () => {
-    vi.useFakeTimers();
-    const { child, stdout } = makeAppServerChild();
+  it("removes the attach temp dir on abort", async () => {
+    const { child } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
+    const controller = new AbortController();
 
     const stream = invokeAgent({
       agent: "zcode",
-      prompt: "think hard",
-      binOverride: "/resolved/node",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+      signal: controller.signal,
     });
 
-    // Drive start() to completion: the 4 JSON-RPC requests resolve, the
-    // silence timer arms, and onEvent is wired. No events yet.
-    await flushMicrotasks();
+    await new Promise((r) => setTimeout(r, 0));
+    controller.abort();
+    await new Promise((r) => setTimeout(r, 0));
 
-    const eventsPromise = collectStream(stream);
-
-    // t=0: a reasoning_delta arrives → mapped to onEvent(thinking_delta) →
-    // resetSilenceTimer (180s window, fires at t=180s if nothing resets).
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { kind: "reasoning_delta", delta: "reasoning..." } },
-      })}\n`,
-    );
-    await flushMicrotasks();
-
-    // Advance to t=179s: still inside the first window, emit another
-    // reasoning_delta → resets the clock to t=179+180=359s.
-    vi.advanceTimersByTime(179_000);
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { kind: "reasoning_delta", delta: "still thinking..." } },
-      })}\n`,
-    );
-    await flushMicrotasks();
-
-    // Advance to t=200s and deliver the terminal usage → finish(0). At t=200s
-    // the silence window (armed at t=179, would fire at t=359s) has NOT fired.
-    vi.advanceTimersByTime(21_000);
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
-    stdout.end();
-    await flushMicrotasks();
-    child.emit("close", 0);
-
-    const events = await eventsPromise;
-
-    const errors = events.filter((e) => e.type === "error");
-    const silenceErrors = errors.filter((e) =>
-      /went silent/.test((e as { message?: string }).message ?? ""),
-    );
-    expect(silenceErrors).toHaveLength(0);
-    const done = events.filter((e) => e.type === "done");
-    expect(done).toHaveLength(1);
-    expect(done[0]).toMatchObject({ type: "done", code: 0 });
+    expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
   });
 
-  // (b) Genuine silence: the turn driver resolved (timer armed) but NO events
-  // arrive. After 180s the timer fires → emits {type:"error", /went silent/}
-  // and calls finish(1). The stream closes with a non-zero done code. This is
-  // the core robustness guarantee: a dead turn surfaces a clean error instead
-  // of hanging forever.
-  it("fires the silence error + finish(1) after 180s with zero events (#22)", async () => {
-    vi.useFakeTimers();
-    const { child } = makeAppServerChild();
+  it("removes the attach temp dir when the consumer cancels the stream", async () => {
+    const { child } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
-    await flushMicrotasks();
-
-    const eventsPromise = collectStream(stream);
-
-    // Arm happened at t=0 (turn driver resolved). Emit NOTHING for 181s.
-    vi.advanceTimersByTime(181_000);
-    await flushMicrotasks();
-
-    const events = await eventsPromise;
-    const errors = events.filter((e) => e.type === "error");
-    expect(errors.length).toBeGreaterThanOrEqual(1);
-    expect((errors[0] as { message?: string }).message).toMatch(/went silent for 180s/);
-    const done = events.filter((e) => e.type === "done");
-    expect(done).toHaveLength(1);
-    expect(done[0]).toMatchObject({ type: "done", code: 1 });
-  });
-
-  // (c) Reset on tool events: a tool_use arrives at t=170s (inside the first
-  // window) and resets the clock. Genuine silence then must fire at ≈350s
-  // (170+180), NOT ≈180s. This proves the reset logic — a tool call (the
-  // canonical agentic-liveness signal) refreshes the timer just like a delta.
-  it("resets the silence clock on a tool_use event (#22)", async () => {
-    vi.useFakeTimers();
-    const { child, stdout } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "use a tool",
-      binOverride: "/resolved/node",
-    });
-
-    await flushMicrotasks();
-
-    const eventsPromise = collectStream(stream);
-
-    // t=0: arm. Advance to t=170s (inside the first 180s window) and emit a
-    // tool_use → resets the clock to t=170+180=350s.
-    vi.advanceTimersByTime(170_000);
-    stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: {
-          payload: {
-            kind: "tool_call",
-            toolCallId: "ws1",
-            toolName: "WebSearch",
-            input: { query: "x" },
-          },
-        },
-      })}\n`,
-    );
-    await flushMicrotasks();
-
-    // Advance past the ORIGINAL 180s window (t=170+179=349s) without crossing
-    // the RESET 350s boundary. The timer must NOT have fired here — if it had,
-    // the stream would already have closed with a silence error + done. We
-    // assert that by reading the next event without blocking: a closed stream
-    // resolves to {done:true}; an open one keeps the read pending. Since
-    // fake-timer advancement is synchronous and we haven't crossed 350s, the
-    // read stays pending — so we cancel it and rely on the cross-350s
-    // assertion below (exactly ONE silence error, not two) to prove no early
-    // fire at t=180s.
-    vi.advanceTimersByTime(179_000); // now at t=349s
-    await flushMicrotasks();
-
-    // Cross the 350s boundary → timer fires.
-    vi.advanceTimersByTime(2_000); // now at t=351s
-    await flushMicrotasks();
-
-    const events = await eventsPromise;
-    const silenceErrors = events.filter(
-      (e) => e.type === "error" && /went silent/.test((e as { message?: string }).message ?? ""),
-    );
-    // Exactly ONE silence error: the reset worked (no fire at the original
-    // t=180s window; the only fire is the reset window at t=350s).
-    expect(silenceErrors).toHaveLength(1);
-    const done = events.filter((e) => e.type === "done");
-    expect(done).toHaveLength(1);
-    expect(done[0]).toMatchObject({ type: "done", code: 1 });
-  });
-
-  // (d) Timer hygiene: after teardown (e.g. the child dies mid-turn), the
-  // silence timer is disarmed and must NOT fire post-teardown. A stray fire
-  // would enqueue an error after close (dropped by safeEnqueue's closed guard,
-  // but the timer should be cleared regardless to avoid leaking / racing).
-  it("clears the silence timer on teardown so no stray fire leaks after close (#22)", async () => {
-    vi.useFakeTimers();
-    const { child } = makeAppServerChild();
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-    });
-
-    await flushMicrotasks();
-
-    const eventsPromise = collectStream(stream);
-
-    // Tear down mid-turn: the child exits before any terminal event.
-    child.emit("close", 1);
-    await flushMicrotasks();
-
-    const events = await eventsPromise;
-
-    // Advancing way past 180s must not produce a silence error — the timer was
-    // cleared in finish()→teardown() when the close handler ran.
-    vi.advanceTimersByTime(200_000);
-    await flushMicrotasks();
-
-    const silenceErrors = events.filter(
-      (e) => e.type === "error" && /went silent/.test((e as { message?: string }).message ?? ""),
-    );
-    expect(silenceErrors).toHaveLength(0);
-  });
-
-  // (e) Cancel-path disarm: when the STREAM CONSUMER cancels (distinct from
-  // teardown-via-child-death), the silence timer must be cleared in cancel()
-  // — a ReadableStream sibling that does NOT run through finish()/teardown().
-  // This is why `silenceTimer` + `clearSilenceTimer` are hoisted above the
-  // ReadableStream (sibling to `child`): cancel() is not inside start() and
-  // could not otherwise reach them. Covers spec AC "disarmed on ... cancel".
-  //
-  // Detection strategy: cancel() calls child.kill("SIGTERM") exactly once. If
-  // the timer were NOT cleared, advancing past 180s would fire it → finish(1)
-  // → teardown() → child.kill a SECOND time. So assert kill was called exactly
-  // once after advancing — a stray fire would make it twice. (The fake child
-  // lacks a real `kill` — it's an EventEmitter + streams, not a ChildProcess
-  // — so we attach a spy directly; production wraps it in try/catch.)
-  it("clears the silence timer when the stream consumer cancels (#22)", async () => {
-    vi.useFakeTimers();
-    const { child } = makeAppServerChild();
-    const killSpy = vi.fn();
-    (child as unknown as { kill: unknown }).kill = killSpy;
-    mockSpawn.mockReturnValue(child);
-
-    const stream = invokeAgent({
-      agent: "zcode",
-      prompt: "p",
-      binOverride: "/resolved/node",
-    });
-
-    await flushMicrotasks();
-
+    await new Promise((r) => setTimeout(r, 0));
     await stream.cancel();
-    await flushMicrotasks();
+    await new Promise((r) => setTimeout(r, 0));
 
-    // cancel() killed the child once. Now advance past 180s — if the timer
-    // survived, its fire would call finish()→teardown()→child.kill again.
-    vi.advanceTimersByTime(200_000);
-    await flushMicrotasks();
-
-    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
   });
 });
 
-// ADR-0007: on Linux ZCode ships as an AppImage with zcode.cjs packed inside,
-// reachable only while mounted. The adapter self-mounts at turn start
-// (`AppImage --appimage-mount`), spawns `node <mountPoint>/resources/glm/
-// zcode.cjs app-server`, and kills the mount child on teardown/cancel. These
-// tests stub process.platform to "linux" and script the spawn mock to return a
-// fake mount child for the first call (argv includes "--appimage-mount") and a
-// fake app-server child for the second.
-describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
+describe("invokeAgent — Linux AppImage self-mount (ADR-0007, CLI one-shot form)", () => {
   const mountCjs = (mp: string) => `${mp}/resources/glm/zcode.cjs`;
   const REAL_PLATFORM = process.platform;
   const flushMicrotasks = async (iterations = 200) => {
@@ -1282,9 +374,12 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
 
   beforeEach(() => {
     mockSpawn.mockReset();
+    mockMkdtempSync.mockClear();
+    mockWriteFileSync.mockClear();
+    mockRmSync.mockClear();
     existsSyncDelegate.mockImplementation((p: string) =>
       p === "/opt/ZCode.AppImage" ||
-      p === "/resolved/node" ||
+      p === "/resolved/node.exe" ||
       p === "/bin/sh",
     );
     vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
@@ -1296,48 +391,48 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
     existsSyncDelegate.mockImplementation((p: string) => p === "/bin/sh");
   });
 
-  // (1) The mount child is spawned BEFORE the app-server child, and the
-  // app-server argv carries the mount-point cjs path (not the AppImage path).
-  it("mounts the AppImage before spawning app-server; cjs argv is the mount-point path", async () => {
+  const isMountSpawn = (argv: string[]) => argv.includes("--appimage-mount");
+
+  // (1) The mount child is spawned BEFORE the CLI child, and the CLI argv
+  // carries the mount-point cjs path (not the AppImage path).
+  it("mounts the AppImage before spawning the CLI; cjs argv is the mount-point path", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     const mountPoint = "/tmp/.mount_ZCode-xxxx";
     const mount = makeMountChild(mountPoint);
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
-      argv.includes("--appimage-mount") ? mount.child : app.child,
+      isMountSpawn(argv) ? mount.child : app.child,
     );
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "build it",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
-    // Let the mount resolve (setTimeout(0) write + microtasks + app-server spawn).
+    // Let the mount resolve (setTimeout(0) write + microtasks + CLI spawn).
     await new Promise((r) => setTimeout(r, 50));
     const eventsPromise = collectStream(stream);
 
-    app.stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
+    app.stdout.write(`${zcodeLines().join("\n")}\n`);
     app.stdout.end();
     await new Promise((r) => setImmediate(r));
     app.child.emit("close", 0);
-
     await eventsPromise;
 
-    // Two spawns: mount first, app-server second.
+    // Two spawns: mount first, CLI second.
     expect(mockSpawn).toHaveBeenCalledTimes(2);
     const [mountCall, appCall] = mockSpawn.mock.calls as unknown as [string, string[]][];
-    // Mount: bin is the AppImage, argv is ["--appimage-mount"].
     expect(mountCall[0]).toBe("/opt/ZCode.AppImage");
     expect(mountCall[1]).toEqual(["--appimage-mount"]);
-    // App-server: bin is the node driver, argv is [mountCjs, "app-server"].
-    expect(appCall[0]).toBe("/resolved/node");
-    expect(appCall[1]).toEqual([mountCjs(mountPoint), "app-server"]);
+    expect(appCall[0]).toBe("/resolved/node.exe");
+    // CLI argv: mount-point cjs in argv[0], the one-shot flags — and no
+    // `app-server` subcommand anywhere.
+    expect(appCall[1][0]).toBe(mountCjs(mountPoint));
+    expect(appCall[1]).not.toContain("app-server");
+    expect(appCall[1]).toEqual(
+      expect.arrayContaining(["-p", "--attach", "--output-format", "stream-json", "--mode", "yolo"]),
+    );
   });
 
   // (2) The start event reports the mount-point cjs argv (proves the cjs path
@@ -1346,25 +441,20 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     const mountPoint = "/tmp/.mount_ZCode-yyyy";
     const mount = makeMountChild(mountPoint);
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
-      argv.includes("--appimage-mount") ? mount.child : app.child,
+      isMountSpawn(argv) ? mount.child : app.child,
     );
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 50));
     const eventsPromise = collectStream(stream);
-    app.stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
+    app.stdout.write(`${zcodeLines().join("\n")}\n`);
     app.stdout.end();
     await new Promise((r) => setImmediate(r));
     app.child.emit("close", 0);
@@ -1373,33 +463,33 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
     const startEv = events.find((e) => e.type === "start");
     expect(startEv).toMatchObject({
       type: "start",
-      bin: "/resolved/node",
-      argv: [mountCjs(mountPoint), "app-server"],
+      bin: "/resolved/node.exe",
     });
+    expect((startEv as { argv: string[] }).argv[0]).toBe(mountCjs(mountPoint));
   });
 
-  // (3) When the app-server child dies mid-turn, teardown kills the mount child
+  // (3) When the CLI child dies mid-turn, teardown kills the mount child
   // too (per-turn mount+unmount — no leak across turns).
-  it("kills the mount child when the app-server child dies mid-turn", async () => {
+  it("kills the mount child when the CLI child dies mid-turn", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     const mount = makeMountChild("/tmp/.mount_ZCode-zzz");
     const mountKillSpy = vi.fn();
     (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
-      argv.includes("--appimage-mount") ? mount.child : app.child,
+      isMountSpawn(argv) ? mount.child : app.child,
     );
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 50));
     const eventsPromise = collectStream(stream);
 
-    // App-server child dies before any terminal event → teardown.
+    // CLI child dies → the close handler's cleanup kills the mount holder.
     app.child.emit("close", 1);
     await eventsPromise;
 
@@ -1407,21 +497,21 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
   });
 
   // (4) When the stream consumer cancels, cancel() — a ReadableStream sibling
-  // of start() — kills the mount child (it can't reach killChild() inside start).
+  // of start() — kills the mount child (it can't reach start()'s locals).
   it("kills the mount child when the stream consumer cancels", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     const mount = makeMountChild("/tmp/.mount_ZCode-cancel");
     const mountKillSpy = vi.fn();
     (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
-      argv.includes("--appimage-mount") ? mount.child : app.child,
+      isMountSpawn(argv) ? mount.child : app.child,
     );
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 50));
@@ -1432,21 +522,21 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
   });
 
   // (5) A mount child that exits non-zero (FUSE missing / corrupt AppImage)
-  // produces a clear error event and never spawns the app-server child.
-  it("emits a clear error and never spawns app-server when the mount child exits non-zero", async () => {
+  // produces a clear error event and never spawns the CLI child.
+  it("emits a clear error and never spawns the CLI when the mount child exits non-zero", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     const mount = makeMountChild("/never/printed", false);
     const mountKillSpy = vi.fn();
     (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
-      argv.includes("--appimage-mount") ? mount.child : app.child,
+      isMountSpawn(argv) ? mount.child : app.child,
     );
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 10));
@@ -1458,7 +548,7 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
     const errors = events.filter((e) => e.type === "error");
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect((errors[0] as { message?: string }).message).toMatch(/mount/i);
-    // Only the mount child was spawned — app-server never reached.
+    // Only the mount child was spawned — the CLI never reached.
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     // Mount child was cleaned up on the failure path.
     expect(mountKillSpy).toHaveBeenCalled();
@@ -1472,15 +562,15 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
     const mount = makeMountChild("/never/printed", false);
     const mountKillSpy = vi.fn();
     (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
-      argv.includes("--appimage-mount") ? mount.child : app.child,
+      isMountSpawn(argv) ? mount.child : app.child,
     );
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     // Drive start() to the mount await (spawn done, listeners attached, 5s
@@ -1506,22 +596,16 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
     const mount = makeMountChild("/never/printed", false);
     const mountKillSpy = vi.fn();
     (mount.child as unknown as { kill: unknown }).kill = mountKillSpy;
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockImplementation((_bin: string, argv: string[]) =>
-      argv.includes("--appimage-mount") ? mount.child : app.child,
-    );
-    vi.stubEnv("ZCODE_BIN", "/opt/ZCode.AppImage");
-    existsSyncDelegate.mockImplementation((p: string) =>
-      p === "/opt/ZCode.AppImage" ||
-      p === "/resolved/node" ||
-      p === "/bin/sh",
+      isMountSpawn(argv) ? mount.child : app.child,
     );
 
     const controller = new AbortController();
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "p",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
       signal: controller.signal,
     });
 
@@ -1541,73 +625,65 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007)", () => {
   // points directly at the zcode.cjs bundle (the detect tests set
   // ZCODE_BIN=<…>.cjs and assert available=true). For a `.cjs` the AppImage
   // self-mount would spawn `<.cjs> --appimage-mount` and fail — a JS bundle is
-  // not an executable AppImage. So on Linux the `.cjs` is used directly: exactly
-  // ONE spawn (the app-server child), argv carries the override verbatim, and no
-  // spawn argv contains `--appimage-mount`. The AppImage install is untouched
-  // (the cases above); only the `.cjs` shape takes the direct-use branch.
+  // not an executable AppImage. So on Linux the `.cjs` is used directly:
+  // exactly ONE spawn (the CLI child), argv carries the override in argv[0],
+  // and no spawn argv contains `--appimage-mount`.
   it("(T4) uses a ZCODE_BIN .cjs override directly on Linux — no AppImage mount (#30)", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     vi.stubEnv("ZCODE_BIN", "/opt/zcode/override.cjs");
     existsSyncDelegate.mockImplementation((p: string) =>
       p === "/opt/zcode/override.cjs" ||
-      p === "/resolved/node" ||
+      p === "/resolved/node.exe" ||
       p === "/bin/sh",
     );
-    const app = makeAppServerChild();
+    const app = makeFakeChild();
     mockSpawn.mockReturnValue(app.child);
 
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "build it",
-      binOverride: "/resolved/node",
+      binOverride: "/resolved/node.exe",
     });
 
     await new Promise((r) => setTimeout(r, 50));
     const eventsPromise = collectStream(stream);
 
-    app.stdout.write(
-      `${JSON.stringify({
-        method: "session/event",
-        params: { payload: { resultType: "success", usage: { inputTokens: 1 } } },
-      })}\n`,
-    );
+    app.stdout.write(`${zcodeLines().join("\n")}\n`);
     app.stdout.end();
     await new Promise((r) => setImmediate(r));
     app.child.emit("close", 0);
 
     const events = await eventsPromise;
 
-    // Exactly ONE spawn — the app-server child. No mount child is spawned.
+    // Exactly ONE spawn — the CLI child. No mount child is spawned.
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     const calls = mockSpawn.mock.calls as unknown as [string, string[]][];
     const [appCall] = calls;
-    expect(appCall[0]).toBe("/resolved/node");
+    expect(appCall[0]).toBe("/resolved/node.exe");
     // argv uses the .cjs override verbatim — NOT a `<mount>/resources/glm/...` path.
-    expect(appCall[1]).toEqual(["/opt/zcode/override.cjs", "app-server"]);
+    expect(appCall[1][0]).toBe("/opt/zcode/override.cjs");
     // No spawn argv contains `--appimage-mount` (the mount flow never ran).
     for (const [, argv] of calls) {
       expect(argv).not.toContain("--appimage-mount");
     }
     // The .cjs override propagates to the start event too.
     const startEv = events.find((e) => e.type === "start");
-    expect(startEv).toMatchObject({
-      type: "start",
-      argv: ["/opt/zcode/override.cjs", "app-server"],
-    });
+    expect((startEv as { argv: string[] }).argv[0]).toBe("/opt/zcode/override.cjs");
   });
 });
 
+
 // Regression guards for the argv branch — keep parity with the pre-T6 behavior
-// so the new app-server routing doesn't disturb existing adapters.
+// so the argv-attach routing doesn't disturb existing adapters.
 describe("invokeAgent — argv branch (regression)", () => {
-  // Isolate from the app-server describe above: that block legitimately calls
+  // Isolate from the zcode describes above: those blocks legitimately call
   // spawn and its beforeEach reset is scoped to its own tests. Reset the mock
   // here too so the call-count assertion below counts only this block's spawn.
   beforeEach(() => {
     mockSpawn.mockReset();
   });
 
-  // #17: quoteWindowsArg is gated to the app-server (ZCode) branch only. The
+  // #17: per-element quoting applies only to zcode's shell-fallback corner. The
   // shared argv spawn (every argv / argv-message agent — deepseek-tui,
   // openclaw) must pass argv verbatim, matching the `main` baseline. This pins
   // that guarantee on a win32-mocked host: no argv element gains quotes.

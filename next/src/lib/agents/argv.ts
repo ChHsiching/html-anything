@@ -20,6 +20,15 @@ export class UnsupportedAgentProtocolError extends Error {
   }
 }
 
+/**
+ * The fixed short guide ZCode's `-p` flag carries. The attachment holds the
+ * real task, so this only points the model at it and pins the deliverable
+ * shape (final HTML as the reply body — ZCode is agentic and would otherwise
+ * reach for file-write tools). Keep it short: `-p` takes an argv value.
+ */
+const ZCODE_PROMPT_GUIDE =
+  "附件是完整的任务说明。请严格按其中的要求执行，并将最终结果（完整 HTML）直接作为你的回复正文输出。";
+
 export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
   const { model } = _opts;
   switch (agent) {
@@ -126,6 +135,22 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
       // there's no `-` stdin sentinel. invoke.ts appends opts.prompt at
       // spawn time, so we leave the trailing slot empty here.
       return ["exec", "--auto", ...(model ? ["--model", model] : [])];
+    case "zcode":
+      // Headless one-shot. `-p` carries ONLY this fixed short guide — the
+      // full prompt (shared directives + template + user content, 20-30KB+)
+      // travels in the `--attach` temp file invoke.ts writes; argv length
+      // limits would truncate it. `--mode yolo` is `-p`'s default anyway;
+      // passing it is self-documentation. There is no `--model` flag: the
+      // model default comes from ZCode's own provider config (opts.model is
+      // deliberately ignored).
+      return [
+        "-p",
+        ZCODE_PROMPT_GUIDE,
+        "--output-format",
+        "stream-json",
+        "--mode",
+        "yolo",
+      ];
     case "hermes":
     case "kimi":
     case "devin":
@@ -143,6 +168,12 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
 export function envFor(agent: string): NodeJS.ProcessEnv {
   const base = { ...process.env };
   if (agent === "gemini") base.GEMINI_CLI_TRUST_WORKSPACE = "true";
+  // ZCode's zcode.cjs is an Electron-hosted bundle; without
+  // ELECTRON_RUN_AS_NODE=1 it boots the full Electron app instead of the CLI
+  // and the prompt is never executed (live-proven). Merged INTO the env (not
+  // a replacement) so PATH, ZCODE_*, and the provider-config escape-hatch
+  // vars survive. Scoped to zcode — other agents must not inherit it.
+  if (agent === "zcode") base.ELECTRON_RUN_AS_NODE = "1";
   return base;
 }
 
@@ -202,11 +233,11 @@ export function parseLine(agent: string, line: string): AgentParse[] {
  * content. Returns an empty string if no Write/create_file tool_use was found
  * or its input has no usable content field.
  *
- * Exported because the app-server protocol branch (ZCode) reuses the same
- * rescue logic for ZCode's `write` tool calls — see invoke.ts. Keeping one
- * canonical implementation avoids the two copies drifting.
+ * Module-internal: shared by the agent parse cases below. (The cli mirror
+ * keeps its own internal copy — the two files are adapted copies by repo
+ * convention, not verbatim mirrors.)
  */
-export function rescueHtmlFromToolUse(
+function rescueHtmlFromToolUse(
   content: Array<{ type?: string; name?: string; input?: unknown }> | undefined,
 ): string {
   if (!Array.isArray(content)) return "";
@@ -251,6 +282,37 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
   // go to stderr, which is forwarded as `stderr` events, not parsed here).
   if (agent === "aider" || agent === "codewhale" || agent === "deepseek-tui") {
     return [{ kind: "delta", text: trimmed.endsWith("\n") ? trimmed : trimmed + "\n" }];
+  }
+
+  // ZCode (argv-attach) — NDJSON event envelope, one JSON object per line:
+  //   {"type":"model.streaming","payload":{"kind":"text_delta","delta":"…"},…}
+  // plus a bare {"type":"result",…} terminator line. Only model.streaming
+  // text_delta carries streamed text; every other line — hook-noise
+  // session.updated frames (plugin SessionStart/UserPromptSubmit descriptors
+  // etc., 20+ per turn), turn lifecycle events, the result terminator, and
+  // non-JSON lines — is safely DROPPED. Handled before the shared JSON.parse
+  // so a non-JSON line returns [] here instead of a `noise` part (the invoke
+  // layer forwards noise as `raw`, which would flood the log panel).
+  if (agent === "zcode") {
+    let zcodeParsed: unknown;
+    try {
+      zcodeParsed = JSON.parse(trimmed);
+    } catch {
+      return [];
+    }
+    if (!zcodeParsed || typeof zcodeParsed !== "object") return [];
+    const zcodeObj = zcodeParsed as Record<string, unknown>;
+    if (zcodeObj.type === "model.streaming" && zcodeObj.payload && typeof zcodeObj.payload === "object") {
+      const payload = zcodeObj.payload as { kind?: string; delta?: string };
+      if (
+        payload.kind === "text_delta" &&
+        typeof payload.delta === "string" &&
+        payload.delta.length > 0
+      ) {
+        return [{ kind: "delta", text: payload.delta }];
+      }
+    }
+    return [];
   }
 
   let parsed: unknown;

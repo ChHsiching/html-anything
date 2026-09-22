@@ -20,7 +20,7 @@ export type AgentInfo = {
   available: boolean;
   path?: string;
   /** UI uses this to badge unsupported / batch adapters. Mirrors AgentProtocol on the server. */
-  protocol: "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc" | "app-server";
+  protocol: "stdin" | "argv" | "argv-message" | "argv-attach" | "acp" | "pi-rpc";
   /** Curated model list for the picker. Always begins with `default`. */
   models: ModelOption[];
   /** True for ACP / pi-rpc adapters where Convert returns a friendly error. */

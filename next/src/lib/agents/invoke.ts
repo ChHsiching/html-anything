@@ -1,11 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { resolveOnPath, resolveOpenclawAgentId, resolveZcodeBin, resolveZcodeNodeBin, ZCODE_CJS_SENTINEL, AGENTS, type AgentDef } from "./detect";
-import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError, rescueHtmlFromToolUse } from "./argv";
-import { createZcodeProtocolClient } from "@html-anything/zcode-protocol/zcode-protocol";
-import { ensureWorkspaceModel, startZcodeProtocolTurn, type ZcodeTurnModel } from "@html-anything/zcode-protocol/zcode-session";
-import { readZcodeModelPicker } from "@html-anything/zcode-protocol/zcode-model-picker";
+import { resolveOnPath, resolveOpenclawAgentId, resolveZcodeBin, resolveZcodeNodeBin, ZCODE_CJS_SENTINEL, AGENTS } from "./detect";
+import { buildArgv, envFor, makeParser, UnsupportedAgentProtocolError } from "./argv";
 
 export type InvokeOpts = {
   agent: string;
@@ -43,6 +41,10 @@ type BinResolution =
  * containing a space — notably ZCode's resolved `C:\Program
  * Files\ZCode\resources\glm\zcode.cjs` — must be double-quoted. Already-quoted
  * elements are left alone; empty elements become `""`.
+ *
+ * Only used on zcode's shell fallback path (a `.cmd`/`.bat` node shim): the
+ * normal zcode resolution yields an absolute `.exe`, which spawns directly
+ * with no shell and verbatim argv.
  */
 function quoteWindowsArg(arg: string): string {
   if (arg.length > 0 && arg.startsWith('"') && arg.endsWith('"')) return arg;
@@ -100,24 +102,25 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     return errorStream(`unknown agent: ${opts.agent}`);
   }
 
-  // T12 (#12): app-server agents (ZCode) spawn `node <zcode.cjs> app-server`,
-  // and html-anything is an EXTERNAL process — on a clean Windows host `where
-  // node` finds nothing. The generic resolveBinForAgent() path treats
-  // `def.bin = "node"` as a PATH lookup and treats ZCODE_BIN (def.envOverride)
-  // as the bin override, but ZCODE_BIN is the .cjs override, NOT a node bin.
-  // So app-server gets its OWN bin resolution: binOverride (explicit node path)
-  // wins; otherwise resolveZcodeNodeBin() discovers node-or-Electron-exe (see
-  // its doc comment for the live-proven strategy). Reconciles with
-  // resolveZcodeBin() — they own disjoint concerns (.cjs vs node driver).
+  // T12 (#12), re-keyed to the CLI one-shot form: argv-attach agents (ZCode)
+  // spawn `node <zcode.cjs> -p …`, and html-anything is an EXTERNAL process —
+  // on a clean Windows host `where node` finds nothing. The generic
+  // resolveBinForAgent() path treats `def.bin = "node"` as a PATH lookup and
+  // treats ZCODE_BIN (def.envOverride) as the bin override, but ZCODE_BIN is
+  // the .cjs override, NOT a node bin. So argv-attach agents get their OWN bin
+  // resolution: binOverride (explicit node path) wins; otherwise
+  // resolveZcodeNodeBin() discovers node-or-Electron-exe (see its doc comment
+  // for the live-proven strategy). Execution then continues down the GENERIC
+  // trunk below — ZCode has no dedicated protocol branch anymore.
   //
-  // T15 (#18 / ADR-0005 decision 3): resolveZcodeNodeBin() now returns `string`
+  // T15 (#18 / ADR-0005 decision 3): resolveZcodeNodeBin() returns `string`
   // (not `string | null`) — the Electron-exe fallback is terminal and
   // guaranteed-present whenever detect passed (zcode.cjs found ⟺ ZCode
-  // installed ⟺ exe exists), so there is no "node binary not found" branch
-  // here. Only the binOverride-missing error remains (a user-supplied path that
-  // does not resolve is a real, reachable typo the user deserves to see).
-  if (def.protocol === "app-server") {
-    let bin: string;
+  // installed ⟺ exe exists). Only the binOverride-missing error remains (a
+  // user-supplied path that does not resolve is a real, reachable typo the
+  // user deserves to see).
+  let bin: string;
+  if (def.protocol === "argv-attach") {
     if (opts.binOverride && opts.binOverride.trim()) {
       const tried = opts.binOverride.trim();
       if (/^([a-zA-Z]:[\\/]|[\\/])/.test(tried)) {
@@ -136,21 +139,20 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     } else {
       bin = resolveZcodeNodeBin();
     }
-    return invokeAppServerAgent({ def, bin, opts });
+  } else {
+    const resolved = resolveBinForAgent(def, opts.binOverride);
+    if (resolved.kind === "override-missing") {
+      return errorStream(
+        `${def.label}: custom path \`${resolved.tried}\` does not exist. Update or clear it in Settings → Custom path.`,
+      );
+    }
+    if (resolved.kind === "not-found") {
+      return errorStream(
+        `${def.label} (\`${def.bin}\`) is not installed or not on PATH.`,
+      );
+    }
+    bin = resolved.bin;
   }
-
-  const resolved = resolveBinForAgent(def, opts.binOverride);
-  if (resolved.kind === "override-missing") {
-    return errorStream(
-      `${def.label}: custom path \`${resolved.tried}\` does not exist. Update or clear it in Settings → Custom path.`,
-    );
-  }
-  if (resolved.kind === "not-found") {
-    return errorStream(
-      `${def.label} (\`${def.bin}\`) is not installed or not on PATH.`,
-    );
-  }
-  const bin: string = resolved.bin;
 
   // For openclaw we need an async detection step (resolveOpenclawAgentId)
   // before buildArgv. Do all of the argv assembly inside the stream's async
@@ -158,6 +160,29 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   const env = envFor(opts.agent);
   const promptViaArgv = def.protocol === "argv";
   const promptViaMessageFlag = def.protocol === "argv-message";
+  const promptViaAttach = def.protocol === "argv-attach";
+
+  // Lifted above the ReadableStream so `cancel` — a sibling callback of
+  // `start` that cannot reach its locals — can tear the argv-attach turn's
+  // resources down without waiting on `start`:
+  //   - mountChild: on Linux the AppImage mount child stays alive holding the
+  //     FUSE mount for the duration of the turn (null on Windows/macOS).
+  //   - attachTmpDir: the mkdtemp dir holding zcode's prompt.md attachment.
+  let mountChild: ChildProcessWithoutNullStreams | null = null;
+  let attachTmpDir: string | null = null;
+  const cleanupArgvAttach = () => {
+    // ADR-0007: the mount child holds the FUSE mount alive; kill it so the
+    // mount unmounts at teardown (per-turn mount+unmount). No-op off-Linux.
+    try {
+      mountChild?.kill("SIGTERM");
+    } catch {}
+    if (attachTmpDir) {
+      try {
+        rmSync(attachTmpDir, { recursive: true, force: true });
+      } catch {}
+      attachTmpDir = null;
+    }
+  };
 
   return new ReadableStream<InvokeEvent>({
     async start(controller) {
@@ -179,6 +204,52 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           controller.close();
         } catch {}
       };
+
+      // argv-attach (ZCode): resolve the .cjs argv[1] BEFORE the final argv is
+      // assembled — on Linux that path is only known after the AppImage
+      // self-mounts (ADR-0007 decision 2). Reuses resolveZcodeBin() and the
+      // mount helper unchanged; a ZCODE_BIN pointing at a `.cjs` is used
+      // directly with no mount (ADR-0010 decision 1).
+      let cjsPath: string | undefined;
+      if (promptViaAttach) {
+        if (process.platform === "linux") {
+          const resolvedZcode = resolveZcodeBin();
+          if (!resolvedZcode) {
+            safeEnqueue({
+              type: "error",
+              message:
+                "ZCode AppImage not found. Open the ZCode GUI once (to write its .desktop entry) or set ZCODE_BIN to the AppImage (or the zcode.cjs bundle).",
+            });
+            safeClose();
+            return;
+          }
+          if (resolvedZcode.endsWith(".cjs")) {
+            cjsPath = resolvedZcode;
+          } else {
+            try {
+              const mounted = await mountZcodeAppImage(resolvedZcode, {
+                cwd: opts.cwd,
+                signal: opts.signal,
+              });
+              mountChild = mounted.mountChild;
+              cjsPath = path.posix.join(
+                mounted.mountPoint,
+                "resources",
+                "glm",
+                "zcode.cjs",
+              );
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              cleanupArgvAttach();
+              safeEnqueue({ type: "error", message });
+              safeClose();
+              return;
+            }
+          }
+        } else {
+          cjsPath = resolveZcodeBin() ?? ZCODE_CJS_SENTINEL;
+        }
+      }
 
       // Resolve agent-specific argv. For openclaw we first probe `agents
       // list` to learn the actual agent id (commonly "main") so the CLI's
@@ -212,29 +283,67 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       // `protocol: "argv-message"` (openclaw today) wants the prompt under
       // an explicit `--message <text>` flag.
       if (promptViaMessageFlag) argv = [...argv, "--message", opts.prompt];
+      // `protocol: "argv-attach"` (zcode today): the full prompt (shared
+      // directives + template + user content, 20-30KB+) is far past command-
+      // line length limits, so it travels as a temp-file attachment — the
+      // `.md` enters the model context whole (live-proven). `-p` (buildArgv)
+      // already carries the fixed short guide. The mkdtemp dir is removed on
+      // every exit path via cleanupArgvAttach (close / error / abort /
+      // cancel).
+      if (promptViaAttach) {
+        try {
+          attachTmpDir = mkdtempSync(path.join(tmpdir(), "html-anything-zcode-"));
+          writeFileSync(path.join(attachTmpDir, "prompt.md"), opts.prompt, "utf8");
+        } catch (err) {
+          safeEnqueue({
+            type: "error",
+            message: `failed to write the ZCode prompt attachment: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          cleanupArgvAttach();
+          safeClose();
+          return;
+        }
+        argv = [...argv, "--attach", path.join(attachTmpDir, "prompt.md")];
+      }
 
-      // node-script CLIs (ZCode's zcode.cjs) run as `node <cjs> app-server`;
-      // binArgs carries the leading argv the bin needs. Absent for every
-      // existing adapter, so their spawn is unchanged. See ADR-0002 decision 3.
-      const fullArgv = def.binArgs?.length ? [...def.binArgs, ...argv] : argv;
+      // node-script CLIs (ZCode's zcode.cjs) run as `node <cjs> -p …`;
+      // binArgs carries the leading argv the bin needs, with the
+      // `<resolved-zcode-cjs>` sentinel filled from the path resolved above
+      // (the mounted path on Linux). Absent for every existing adapter, so
+      // their spawn is unchanged. See ADR-0002 decision 3.
+      const leadingArgv = (def.binArgs ?? []).map((arg) =>
+        arg === ZCODE_CJS_SENTINEL && cjsPath ? cjsPath : arg,
+      );
+      const fullArgv = leadingArgv.length ? [...leadingArgv, ...argv] : argv;
 
       try {
         // On Windows, `spawn` cannot launch a `.cmd` / `.bat` shim (which is
         // what npm installs for most CLI agents) without going through the
         // shell. Without this, every agent invocation fails with
         // EINVAL / "spawn 无效的参数". macOS/Linux use direct exec.
-        // Safety: prompt content is delivered via stdin or `--message
-        // <text>` (argv-message), not interpolated into a shell command,
-        // so this does not introduce a shell-injection vector.
+        // Safety: prompt content is delivered via stdin, `--message <text>`
+        // (argv-message), or a temp-file `--attach` path (argv-attach) —
+        // never interpolated into a shell command, so this does not introduce
+        // a shell-injection vector.
         //
-        // Only the BIN is quoted (for the shim); argv elements are passed
-        // VERBATIM — the `main` baseline. Per-element quoting
-        // (quoteWindowsArg) lives in the app-server (ZCode) branch below,
-        // where spaced Windows paths (`C:\Program Files\ZCode\…`) need it.
-        const useShell = process.platform === "win32";
+        // EXCEPTION — an ABSOLUTE `.exe` (ZCode's `ZCode.exe` node driver, or
+        // a real node.exe) spawns DIRECTLY: no cmd.exe round-trip, so spaced
+        // install paths (`C:\Program Files\ZCode\ZCode.exe`) work untouched
+        // and every argv element passes verbatim — no quoting games. Only
+        // the BIN is quoted on the shell path (the `main` baseline);
+        // per-element quoting (quoteWindowsArg) applies solely to zcode's
+        // `.cmd`-shim corner, where the spaced `zcode.cjs` path must survive
+        // cmd.exe's whitespace split. (The cli mirror deliberately differs
+        // here: it never quoted the bin on its generic shell path, so it
+        // gates ALL quoting — bin included — on the zcode attach case.)
+        const binIsAbsoluteExe =
+          process.platform === "win32" &&
+          /^([a-zA-Z]:[\\/]|[\\/])/.test(bin) &&
+          /\.exe$/i.test(bin);
+        const useShell = process.platform === "win32" && !binIsAbsoluteExe;
         child = spawn(
-          useShell ? `"${bin}"` : bin!,
-          fullArgv,
+          useShell ? `"${bin}"` : bin,
+          useShell && promptViaAttach ? fullArgv.map(quoteWindowsArg) : fullArgv,
           {
             cwd: opts.cwd ?? process.cwd(),
             env,
@@ -248,6 +357,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           type: "error",
           message: err instanceof Error ? err.message : String(err),
         });
+        cleanupArgvAttach();
         safeClose();
         return;
       }
@@ -262,8 +372,9 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       child.stdin.on("error", () => {});
       try {
         // stdin-protocol agents read the prompt from stdin; argv / argv-message
-        // agents already have it on the command line.
-        if (!promptViaArgv && !promptViaMessageFlag) child.stdin.write(opts.prompt);
+        // agents already have it on the command line; argv-attach agents carry
+        // it in the temp-file attachment — stdin stays empty for all three.
+        if (!promptViaArgv && !promptViaMessageFlag && !promptViaAttach) child.stdin.write(opts.prompt);
         child.stdin.end();
       } catch {}
 
@@ -306,6 +417,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
 
       child.on("error", (err) => {
         safeEnqueue({ type: "error", message: err.message });
+        cleanupArgvAttach();
         safeClose();
       });
 
@@ -372,6 +484,9 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
             }
           }
         }
+        // argv-attach teardown: kill the Linux mount holder and remove the
+        // prompt temp dir (no-op for every other agent).
+        cleanupArgvAttach();
         safeEnqueue({ type: "done", code });
         safeClose();
       });
@@ -380,65 +495,27 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         try {
           child?.kill("SIGTERM");
         } catch {}
+        cleanupArgvAttach();
         safeClose();
       };
       opts.signal?.addEventListener("abort", onAbort, { once: true });
     },
-    cancel() {},
+    cancel() {
+      // Stream consumer cancelled. Release the argv-attach turn's resources
+      // (mount holder + prompt temp file); the child itself is governed by
+      // the abort signal — unchanged generic behavior.
+      cleanupArgvAttach();
+    },
   });
 }
 
-// ─── app-server protocol branch (ZCode) ───────────────────────────────
+// ─── ZCode AppImage self-mount (Linux; ADR-0007) ──────────────────────
 //
-// Drives a single JSON-RPC turn over a spawned `zcode app-server` child and
-// bridges the protocol layer's events into the shared `InvokeEvent` stream.
-// Distinct from the "acp" path: ZCode's app-server wire format
-// (workspace/* + session/*) is not the ACP JSON-RPC the hermes/kimi family
-// speaks — do not assume a shared parser (ADR-0002 decision 2).
-//
-// The protocol client wraps the child but never kills it; owning the process
-// lifecycle (spawn + kill) is this layer's job (ADR-0001 "Protocol client vs
-// child process").
-
-type AppServerInvokeArgs = {
-  def: AgentDef;
-  bin: string;
-  opts: InvokeOpts;
-};
-
-/**
- * Resolve the user's per-agent ZCode model pick into the `{providerId, modelId}`
- * pair `session/create` binds to the session (#19 / ADR-0005 decision 4).
- *
- * The UI stores only the model id string per agent (`agentModels[id]`), so the
- * `providerId` must be recovered. The picker models (built at detect time from
- * `~/.zcode/v2/config.json`) each carry their `providerId`; we read the same
- * resolved config here and find the entry whose id matches the pick. When the
- * same model id exists under multiple enabled providers (e.g. GLM-5.2 is on
- * both `builtin:bigmodel` and `builtin:bigmodel-coding-plan`), prefer the entry
- * whose provider is the GUI's selected one — `readZcodeModelPicker` derives
- * `defaultProviderId` from `setting.json`'s `modelProviderFamilySelectedKeys`.
- *
- * Returns `undefined` when the pick is absent, `"default"`, or not found in the
- * dynamic list — in all those cases `session/create` carries no `model` field
- * and the workspace default (provisioned by `ensureWorkspaceModel`) applies,
- * which is the unchanged pre-#19 path.
- */
-function resolveZcodeTurnModel(modelPick: string | undefined): ZcodeTurnModel | undefined {
-  const trimmed = modelPick?.trim();
-  if (!trimmed || trimmed === "default") return undefined;
-  const { models, defaultProviderId } = readZcodeModelPicker();
-  const matches = models.filter((m) => m.id === trimmed);
-  if (matches.length === 0) return undefined;
-  // Prefer the GUI's selected provider when the picked model id is ambiguous
-  // across providers; otherwise take the first match (insertion order = the
-  // GUI's display order).
-  const chosen =
-    defaultProviderId !== null
-      ? matches.find((m) => m.providerId === defaultProviderId) ?? matches[0]!
-      : matches[0]!;
-  return { providerId: chosen.providerId, modelId: chosen.id };
-}
+// Shared helper for the argv-attach (CLI one-shot) trunk: on Linux the
+// zcode.cjs bundle lives inside the AppImage squashfs, so the turn
+// self-mounts the AppImage first and spawns node against the mounted
+// <mountPoint>/resources/glm/zcode.cjs. The generic trunk owns the process
+// lifecycle (spawn + kill).
 
 /**
  * Self-mount the ZCode AppImage (ADR-0007 decision 2). Spawns
@@ -458,7 +535,7 @@ async function mountZcodeAppImage(
   const mountChild = spawn(appImage, ["--appimage-mount"], {
     cwd: opts.cwd ?? process.cwd(),
     // All-pipe stdio keeps the type ChildProcessWithoutNullStreams (matching
-    // the app-server child). The mount child never reads stdin; an idle pipe
+    // the CLI child). The mount child never reads stdin; an idle pipe
     // is harmless and gets torn down with the child on teardown.
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -516,456 +593,6 @@ async function mountZcodeAppImage(
   return { mountChild, mountPoint };
 }
 
-function invokeAppServerAgent({ def, bin, opts }: AppServerInvokeArgs): ReadableStream<InvokeEvent> {
-  // ADR-0004 + #14 (live-probe-corrected): the app-server child self-authentic
-  // ates the LOGIN from the user's logged-in state (a bare session/list returns
-  // the real sessions with no credential handling). BUT a fresh session/create
-  // needs the workspace model configured first, or it fails with
-  // "Model config is missing". The adapter therefore runs the once-per-boot
-  // model relay (ensureWorkspaceModel — upsert+setDefault, reading ZCode's own
-  // ~/.zcode/v2/config.json) before the turn. This is model SELECTION relay
-  // (left-pocket → right-pocket), not credential grafting: the key never
-  // leaves ZCode's ecosystem. #13 deleted this relay on the unverified
-  // assumption the child self-resolves the model too; #14 live probes
-  // disproved that and restored it.
-
-  // binArgs carries the leading argv a node-script CLI needs (e.g.
-  // [ZCODE_CJS_SENTINEL, "app-server"]). The prompt is NOT piped to stdin — it
-  // travels inside the JSON-RPC session/send request. The sentinel on the
-  // AgentDef is filled INSIDE start() (T7) from the resolved cjs path — on
-  // Linux that path is only known after the AppImage is self-mounted, so the
-  // argv cannot be built here (ADR-0007 decision 2).
-
-  // Lifted above the ReadableStream so `cancel` (a sibling callback) can tear
-  // the turn + children down without waiting on `start`.
-  let child: ChildProcessWithoutNullStreams | null = null;
-  // ADR-0007: on Linux the AppImage mount child stays alive holding the FUSE
-  // mount for the duration of the turn; it is killed alongside `child` on
-  // teardown/cancel. Null on Windows/macOS (no mount).
-  let mountChild: ChildProcessWithoutNullStreams | null = null;
-  let turnUnsubscribe: (() => void) | null = null;
-  let client: ReturnType<typeof createZcodeProtocolClient> | null = null;
-  // #22 / spec #20 N2: the silence-timer handle is lifted here (sibling to
-  // `child`) so `cancel` — a ReadableStream sibling, NOT inside `start` — can
-  // clear it on teardown. `clearSilenceTimer` has no closure deps beyond this
-  // handle, so it lifts cleanly. `resetSilenceTimer` stays inside `start`
-  // because its fire callback closes over `safeEnqueue` + `finish`.
-  let silenceTimer: ReturnType<typeof setTimeout> | null = null;
-  const clearSilenceTimer = () => {
-    if (silenceTimer !== null) {
-      clearTimeout(silenceTimer);
-      silenceTimer = null;
-    }
-  };
-
-  return new ReadableStream<InvokeEvent>({
-    async start(controller) {
-      let closed = false;
-
-      const safeEnqueue = (ev: InvokeEvent) => {
-        if (closed) return;
-        try {
-          controller.enqueue(ev);
-        } catch {
-          closed = true;
-        }
-      };
-      const safeClose = () => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.close();
-        } catch {}
-      };
-      const killChild = () => {
-        try {
-          child?.kill("SIGTERM");
-        } catch {}
-        // ADR-0007: the mount child holds the FUSE mount alive; kill it so the
-        // mount unmounts at teardown (per-turn mount+unmount). No-op on
-        // Windows/macOS (mountChild is null there).
-        try {
-          mountChild?.kill("SIGTERM");
-        } catch {}
-      };
-
-      // #22 / spec #20 N2: turn-silence timer. The post-session/send window is
-      // the only unbounded await in the turn — if the model's turn never
-      // completes (stuck tool, runaway reasoning, dropped terminal event) the
-      // stream would hang forever emitting nothing. This is a SILENCE timeout,
-      // not a hard turn cap: it arms once the turn driver has resolved (after
-      // session/send returns) and resets on EVERY onEvent call (including
-      // thinking_delta, the model's "I'm still alive" signal during deep
-      // reasoning) so legitimately long agentic turns keep running as long as
-      // events keep arriving. Only 180s of ZERO events fires. Do NOT arm
-      // earlier — the once-per-boot model relay (ensureWorkspaceModel) can
-      // legitimately take seconds and must not be on the silence clock. The
-      // handle + clearSilenceTimer are lifted above start() so cancel() can
-      // clear them too; resetSilenceTimer stays here (closes over finish +
-      // safeEnqueue).
-      const resetSilenceTimer = () => {
-        clearSilenceTimer();
-        silenceTimer = setTimeout(() => {
-          silenceTimer = null;
-          safeEnqueue({
-            type: "error",
-            message: "zcode turn went silent for 180s (no events from the model)",
-          });
-          finish(1);
-        }, 180_000);
-      };
-
-      const teardown = () => {
-        clearSilenceTimer();
-        try {
-          turnUnsubscribe?.();
-        } catch {}
-        turnUnsubscribe = null;
-        try {
-          client?.dispose();
-        } catch {}
-        client = null;
-        killChild();
-        safeClose();
-      };
-
-      // ZCode's zcode.cjs is an Electron-hosted bundle; without
-      // ELECTRON_RUN_AS_NODE=1 it initializes Electron components and hangs at
-      // boot, answering no JSON-RPC frame. This is ZCode's own standard way to
-      // run a Node child outside a BrowserWindow (zcode.cjs itself spawns its
-      // children with this env at four call sites). The var is merged INTO the
-      // envFor(...) env so the rest of the process env (PATH, ZCODE_*, …)
-      // survives — not a replacement. Scoped to the app-server branch: other
-      // agents must not inherit it. (ADR-0004 / T9.)
-      const env = { ...envFor(opts.agent), ELECTRON_RUN_AS_NODE: "1" };
-
-      // ADR-0007 (+ ADR-0010 decision 1): on Linux the `.cjs` lives inside the
-      // AppImage mount. Self-mount at turn start to expose it, then spawn
-      // `node <mountPoint>/resources/glm/zcode.cjs app-server`. The mount child
-      // is killed on teardown/cancel (per-turn mount+unmount, NOT a process-
-      // level cache — keeps the model stateless, matching Win/macOS). EXCEPTION:
-      // when resolveZcodeBin() returns a `.cjs` directly (a ZCODE_BIN override
-      // pointing at the bundle), use it as-is — no mount (T4 / #30). On
-      // Windows/macOS the `.cjs` is a permanent on-disk file; skip mounting.
-      let cjsPath: string;
-      if (process.platform === "linux") {
-        const resolved = resolveZcodeBin();
-        if (!resolved) {
-          safeEnqueue({
-            type: "error",
-            message:
-              "ZCode AppImage not found. Open the ZCode GUI once (to write its .desktop entry) or set ZCODE_BIN to the AppImage (or the zcode.cjs bundle).",
-          });
-          safeClose();
-          return;
-        }
-        // T4 (#30 / ADR-0010 decision 1): a ZCODE_BIN that points directly at
-        // the zcode.cjs bundle — the documented escape hatch; the detect tests
-        // set ZCODE_BIN=<…>.cjs and assert available=true — is usable AS-IS. A
-        // `.cjs` is a JS bundle, not an executable AppImage, so the self-mount
-        // would spawn `<.cjs> --appimage-mount` and fail (detect promises
-        // available; every turn then failed at mount). Use the `.cjs` directly
-        // and skip the mount (mountChild stays null). Only the AppImage shape
-        // needs the self-mount flow (ADR-0007 decision 2); the non-Linux branch
-        // below is unchanged.
-        if (resolved.endsWith(".cjs")) {
-          cjsPath = resolved;
-        } else {
-          try {
-            const mounted = await mountZcodeAppImage(resolved, {
-              cwd: opts.cwd,
-              signal: opts.signal,
-            });
-            mountChild = mounted.mountChild;
-            cjsPath = path.posix.join(
-              mounted.mountPoint,
-              "resources",
-              "glm",
-              "zcode.cjs",
-            );
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            try { mountChild?.kill("SIGTERM"); } catch {}
-            safeEnqueue({ type: "error", message });
-            safeClose();
-            return;
-          }
-        }
-      } else {
-        cjsPath = resolveZcodeBin() ?? ZCODE_CJS_SENTINEL;
-      }
-
-      // The sentinel on the AgentDef is filled here from the resolved cjs
-      // path so the spawn runs `node <real-cjs-path> app-server` (T7). On
-      // Linux the cjs path is the mounted path above (ADR-0007).
-      const argv = (def.binArgs ?? []).map((arg) =>
-        arg === ZCODE_CJS_SENTINEL ? cjsPath : arg,
-      );
-
-      try {
-        // Same Windows `.cmd`/`.bat` shim handling as the argv branch: quote
-        // the bin and run through a shell on win32 so `node` resolves a
-        // `.cmd` wrapper when one exists. argv elements are quoted too, so
-        // the resolved `zcode.cjs` path (`C:\Program Files\ZCode\...`) is not
-        // split on its space by cmd.exe.
-        const useShell = process.platform === "win32";
-        child = spawn(
-          useShell ? `"${bin}"` : bin,
-          useShell ? argv.map(quoteWindowsArg) : argv,
-          {
-            cwd: opts.cwd ?? process.cwd(),
-            env,
-            stdio: ["pipe", "pipe", "pipe"],
-            shell: useShell,
-            windowsVerbatimArguments: false,
-          },
-        );
-      } catch (err) {
-        safeEnqueue({
-          type: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-        safeClose();
-        return;
-      }
-
-      safeEnqueue({
-        type: "start",
-        bin,
-        argv,
-        promptBytes: Buffer.byteLength(opts.prompt, "utf8"),
-      });
-
-      client = createZcodeProtocolClient(child);
-
-      // Bridge the protocol stream's mapped events into InvokeEvent. Each kind
-      // the consumer cares about becomes one of the shared event types; turn
-      // end (status:completed) signals {type:"done"}; an `error` event or the
-      // turn driver rejecting signals {type:"error"}.
-      let turnEnded = false;
-      const finish = (code: number | null) => {
-        if (turnEnded) return;
-        turnEnded = true;
-        clearSilenceTimer();
-        safeEnqueue({ type: "done", code });
-        teardown();
-      };
-
-      // #21 / spec #20 N1: the protocol stream maps tool_call→{type:"tool_use",
-      // id, name} and result→{type:"tool_result", toolUseId, name} — neither
-      // carries user-visible text, so without this bridge the SSE stream emits
-      // zero bytes during the model's tool window (e.g. a multi-second
-      // WebSearch), freezing the UI. Forward both as {type:"meta", key:"status"}
-      // so the bytes keep flowing (byte-level keepalive) and a future frontend
-      // can surface progress without further adapter work. `meta` is already in
-      // the InvokeEvent union (openclaw emits it for model/session/result), so
-      // this adds no new event type.
-      //
-      // Name resolution: the `tool_result` event from the protocol stream now
-      // carries the tool name directly (read from the frame's own `toolName`
-      // field). We still keep a `toolNamesById` Map as a fallback for any
-      // result event that arrives without a name (defensive — the protocol
-      // layer adds it whenever the frame carries one).
-      const toolNamesById = new Map<string, string>();
-
-      const onEvent = (event: Record<string, unknown>) => {
-        // #22 / spec #20 N2: reset the silence clock as the FIRST statement,
-        // before any early-return guard — ANY event (including thinking_delta,
-        // the weakest liveness signal) refreshes it. This is what distinguishes
-        // "model working slowly" from "turn genuinely dead".
-        resetSilenceTimer();
-        if (closed || turnEnded) return;
-        const type = typeof event.type === "string" ? event.type : "";
-        if (type === "text_delta") {
-          const delta = typeof event.delta === "string" ? event.delta : "";
-          if (delta) safeEnqueue({ type: "delta", text: delta });
-          return;
-        }
-        if (type === "tool_use") {
-          // A file-write tool call may carry the generated HTML; reuse the
-          // same rescue logic the other adapters apply to Claude-style
-          // tool_use blocks.
-          const id = typeof event.id === "string" ? event.id : "";
-          const name = typeof event.name === "string" ? event.name : "";
-          const input = (event.input ?? null) as unknown;
-          if (id && name) toolNamesById.set(id, name);
-          const html = rescueHtmlFromToolUse([{ type: "tool_use", name, input }]);
-          if (html) {
-            safeEnqueue({ type: "html", text: html });
-          } else if (name) {
-            // Non-HTML tool_use (e.g. WebSearch) → forward as a meta status so
-            // the stream keeps flowing during the tool window (#21). Wording
-            // follows the log panel's natural-description convention (no emoji).
-            safeEnqueue({ type: "meta", key: "status", value: `调用工具 ${name}` });
-          }
-          return;
-        }
-        if (type === "tool_result") {
-          // Prefer the name carried on the event itself (protocol stream reads
-          // it from the frame's `toolName` field); fall back to the Map only
-          // if the event arrives nameless. If neither yields a name, emit
-          // nothing — a nameless status line is noise (the log panel shows a
-          // bare ✓ with no context, worse than no line at all).
-          const toolUseId = typeof event.toolUseId === "string" ? event.toolUseId : "";
-          const carriedName = typeof event.name === "string" ? event.name : "";
-          const name = carriedName || (toolUseId && toolNamesById.get(toolUseId)) || "";
-          if (name) {
-            safeEnqueue({ type: "meta", key: "status", value: `工具 ${name} 完成` });
-          }
-          return;
-        }
-        if (type === "usage") {
-          // final-result: turn end. `usage` (and optional `durationMs`) arrive
-          // here as the cumulative end-of-turn summary.
-          safeEnqueue({ type: "meta", key: "usage", value: event.usage ?? null });
-          if (event.durationMs != null) {
-            safeEnqueue({ type: "meta", key: "duration_ms", value: event.durationMs });
-          }
-          finish(0);
-          return;
-        }
-        if (type === "status") {
-          const label = typeof event.label === "string" ? event.label : "";
-          if (label === "completed") {
-            finish(0);
-          } else if (label === "failed") {
-            safeEnqueue({
-              type: "error",
-              message: "zcode turn failed (status: failed)",
-            });
-            finish(1);
-          }
-          return;
-        }
-        if (type === "error") {
-          const message =
-            typeof event.message === "string" && event.message.length > 0
-              ? event.message
-              : "zcode turn failed";
-          safeEnqueue({ type: "error", message });
-          finish(1);
-          return;
-        }
-        // #25 (supersedes ADR-0006 Decision 1): forward the model's reasoning
-        // stream as {type:"meta", key:"thinking"} — the EXACT event shape the
-        // Claude Code argv path emits (argv.ts: thinking_delta content block →
-        // {kind:"meta", key:"thinking", value}) and the shared frontend
-        // `formatMeta` renders as `thinking …`. A live comparison (hsiarch,
-        // 2026-08-12) showed Claude Code streams the same per-fragment thinking
-        // lines and that continuous flow is good UX; ZCode's reasoning was a
-        // black box ONLY because this layer dropped it, not because of any
-        // model/protocol limit (a probe captured 70+ reasoning_delta frames
-        // from ZCode + GLM-5.2). thinking_start carries no payload and is
-        // ignored (early-return) so it produces no empty/garbage log line. HTML
-        // output is unaffected: it travels the separate text_delta → delta
-        // channel and never mixes with thinking.
-        if (type === "thinking_start") return;
-        if (type === "thinking_delta") {
-          const delta = typeof event.delta === "string" ? event.delta : "";
-          if (delta) safeEnqueue({ type: "meta", key: "thinking", value: delta });
-          return;
-        }
-        // ZCode generates a conversation title (source:"generated"); the
-        // protocol layer surfaces it as a conversation_title event. Forward it
-        // as a meta so it isn't silently dropped — uses the existing `meta`
-        // InvokeEvent (no union change); formatMeta's generic fallback renders
-        // `conversation_title: <title>`.
-        if (type === "conversation_title") {
-          const title = typeof event.title === "string" ? event.title : "";
-          if (title) safeEnqueue({ type: "meta", key: "conversation_title", value: title });
-          return;
-        }
-        // Any other/unmapped kind the protocol layer may emit in future is
-        // dropped here (today nothing reaches this point).
-      };
-
-      // The child dying before the turn resolves is an error (the protocol
-      // client already rejects the pending request, but this surfaces a clean
-      // InvokeEvent and runs teardown).
-      child.on("close", (code) => {
-        if (!turnEnded) {
-          safeEnqueue({
-            type: "error",
-            message: `zcode app-server exited before turn completed (code ${code}).`,
-          });
-        }
-        finish(code);
-      });
-      child.on("error", (err) => {
-        safeEnqueue({ type: "error", message: err.message });
-        finish(1);
-      });
-
-      try {
-        // #14: once-per-boot model relay. Required for a fresh session/create
-        // (the child self-auths the login but not the model selection). Runs
-        // exactly once per spawned child; the turn driver then creates the
-        // session against the now-configured workspace.
-        await ensureWorkspaceModel({
-          client,
-          cwd: opts.cwd ?? process.cwd(),
-          signal: opts.signal,
-        });
-        // #19 / ADR-0005 decision 4: resolve the user's per-agent model pick
-        // into {providerId, modelId}. When set (non-default), session/create
-        // carries it and binds it to the session (live-proven). When unset
-        // (default/absent/not-found), session/create carries no model field and
-        // the workspace default (provisioned by the relay above) applies.
-        const model = resolveZcodeTurnModel(opts.model);
-        const turn = await startZcodeProtocolTurn({
-          client,
-          cwd: opts.cwd ?? process.cwd(),
-          prompt: opts.prompt,
-          onEvent,
-          signal: opts.signal,
-          ...(model ? { model } : {}),
-        });
-        turnUnsubscribe = turn.unsubscribe;
-        // #22 / spec #20 N2: the turn driver has resolved — session/send has
-        // returned and the turn is genuinely running. Arm the silence timer
-        // HERE (not earlier): the once-per-boot model relay above can
-        // legitimately take seconds and must not be on the silence clock. Any
-        // onEvent call from here on resets it; finish()/teardown()/cancel()
-        // disarm it.
-        resetSilenceTimer();
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        safeEnqueue({ type: "error", message });
-        finish(1);
-      }
-
-      const onAbort = () => {
-        if (!turnEnded) {
-          safeEnqueue({ type: "error", message: "aborted" });
-        }
-        finish(null);
-      };
-      opts.signal?.addEventListener("abort", onAbort, { once: true });
-    },
-    cancel() {
-      // Stream consumer cancelled: detach the turn listener, dispose the
-      // client, and kill the child. We do NOT enqueue here — the
-      // ReadableStream guarantees no further enqueue after cancel.
-      clearSilenceTimer();
-      try {
-        turnUnsubscribe?.();
-      } catch {}
-      turnUnsubscribe = null;
-      try {
-        client?.dispose();
-      } catch {}
-      client = null;
-      try {
-        child?.kill("SIGTERM");
-      } catch {}
-      // ADR-0007: kill the mount child on cancel too — it is a sibling of
-      // `child`, not reached by killChild() (which lives inside start()).
-      try {
-        mountChild?.kill("SIGTERM");
-      } catch {}
-    },
-  });
-}
 
 function errorStream(message: string): ReadableStream<InvokeEvent> {
   return new ReadableStream<InvokeEvent>({
