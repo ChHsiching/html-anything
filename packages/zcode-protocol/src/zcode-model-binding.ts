@@ -19,7 +19,8 @@
  * explicitly, and any broken link in the resolution chain refuses the spawn
  * with an actionable error instead of silently rerouting.
  *
- * The binding mechanism (live-proven by probe provemodel.mjs + T1's diag3–6):
+ * The binding mechanism (live-proven by probe provemodel.mjs + diag6, then
+ * extended 2026-09-24 after the identity-bridge discovery — probe41-fix.mjs):
  * clone the user's `~/.zcode/v2/provider_config.json` to a temp file, write
  * the exact `config.defaultModelSelection` into the clone, and hand the child
  * the PAIRED env vars `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` (the clone) +
@@ -31,6 +32,18 @@
  * "single variable suffices" probe results were false positives from host env
  * pollution). The user's real config file is NEVER written — the clone is a
  * per-turn temp file owned by the invoke layer's cleanup.
+ *
+ * On ZCode 3.14.3 that pair alone is NOT enough: the headless CLI materializes
+ * an account Coding-Plan provider only when the credential store holds its
+ * `account-provider:<providerId>:identity` key — which the GUI never writes
+ * (only `zcode login` does; the GUI's desktop host pushes its account snapshot
+ * through a different channel). Without it the plan provider is absent from
+ * the registry, the selection is silently discarded, and the turn reroutes to
+ * the first personal provider. The bridge: clone the credentials store into a
+ * temp ZCODE_DATA_BASE_DIR and add a plaintext identity key derived from the
+ * GUI's own api-key key name (decrypt() passes non-`enc:v1:` values through).
+ * See prepareZcodeModelBinding for the trade-off note (sessions land in the
+ * temp dir).
  *
  * Read surface (all private ZCode formats — spec risk register):
  *   - `~/.zcode/v2/setting.json` — current keys `providerFamilyDomain` +
@@ -617,6 +630,7 @@ export type ZcodeBindingRefusal =
   | "gui-keys-missing"
   | "catalog-unreadable"
   | "personal-config-unreadable"
+  | "credentials-missing"
   | "model-not-in-plan"
   | "level-unavailable";
 
@@ -629,6 +643,11 @@ export type ZcodeBindingResult =
     clonePath: string;
     /** The catalog file validated against == the paired builtin env value. */
     builtinCatalogPath: string;
+    /**
+     * The temp ZCODE_DATA_BASE_DIR root holding the bridged credentials
+     * clone. Passed as the third env value by {@link zcodeBindingEnv}.
+     */
+    dataBaseDir: string;
   }
   | {
     ok: false;
@@ -638,10 +657,48 @@ export type ZcodeBindingResult =
   };
 
 /**
- * Resolve + WRITE the per-turn binding: the four-link refusal chain, then a
- * temp clone of the user's personal provider config with the exact
- * `config.defaultModelSelection` written into it. The user's real file is
- * never touched (zero-write contract, snapshot-asserted in tests).
+ * `account-provider:coding-plan:${providerId}:account:${identity}:api-key`
+ * (encodeURIComponent on the identity) — the GUI writes these.
+ */
+const CODING_PLAN_APIKEY_PREFIX = "account-provider:coding-plan:";
+
+function findCodingPlanApiKeyEntry(
+  credentials: Record<string, unknown>,
+  providerId: string,
+): { key: string; identity: string } | null {
+  const prefix = `${CODING_PLAN_APIKEY_PREFIX}${providerId}:account:`;
+  for (const key of Object.keys(credentials)) {
+    if (!key.startsWith(prefix) || !key.endsWith(":api-key")) continue;
+    const raw = key.slice(prefix.length, -":api-key".length);
+    try {
+      return { key, identity: decodeURIComponent(raw) };
+    } catch {
+      return { key, identity: raw };
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve + WRITE the per-turn binding: the refusal chain, then TWO temp
+ * artifacts — a clone of the user's personal provider config with the exact
+ * `config.defaultModelSelection`, and a clone of the credentials store with a
+ * plaintext `account-provider:<providerId>:identity` key bridged in. The
+ * user's real files are never touched (zero-write contract,
+ * snapshot-asserted in tests).
+ *
+ * The identity bridge is load-bearing (live-proven 2026-09-24,
+ * .scratch/.../probe41-fix.mjs): the headless CLI materializes an account
+ * Coding-Plan provider ONLY when the credential store holds its `identity`
+ * key — a key the GUI never writes (only `zcode login` does) — and a provider
+ * without it is absent from the registry, which makes our
+ * defaultModelSelection unselectable and silently reroutes the turn to the
+ * first personal provider. The bridge derives the identity from the GUI's own
+ * api-key key name and delivers it via ZCODE_DATA_BASE_DIR pointing at a
+ * temp dir (decrypt() passes non-`enc:v1:` plaintext through verbatim).
+ * Trade-off: redirecting the data base dir lands the turn's session/log in
+ * the temp dir too — the "session stays visible in the ZCode GUI" acceptance
+ * is traded away for the zero-user-write guarantee.
  *
  * `model` semantics: undefined / "default" binds the plan default — the GUI's
  * own `defaultModelSelection` when it targets the plan provider validly, else
@@ -657,8 +714,8 @@ export function prepareZcodeModelBinding(opts: {
   cjsPath: string;
   /** Picker id: undefined | "default" | "<modelId>/<level>". */
   model?: string;
-  /** Directory for the clone (the invoke layer's attach temp dir — its
-   * existing cleanup removes the clone with the prompt file). */
+  /** Directory for the temp artifacts (the invoke layer's attach temp dir —
+   * its existing cleanup removes everything with the prompt file). */
   attachDir: string;
   settingPath?: string;
   personalConfigPath?: string;
@@ -702,8 +759,41 @@ export function prepareZcodeModelBinding(opts: {
     };
   }
 
+  // The identity bridge's raw material: the GUI-written coding-plan api-key
+  // key for the resolved plan provider. Absent → the headless registry cannot
+  // materialize the plan provider at all → refuse (actionable).
+  const credentialsRecord = isRecord(credentials) ? credentials : {};
+  const apiKeyEntry = findCodingPlanApiKeyEntry(credentialsRecord, plan.providerId);
+  if (!apiKeyEntry) {
+    return {
+      ok: false,
+      code: "credentials-missing",
+      message:
+        `ZCode: no saved Coding Plan credential for ${plan.providerId}. Open the ZCode GUI, log in to your Coding Plan, then retry.`,
+    };
+  }
+
   const selection = resolveSelection(opts.model, plan, planModels, personal);
   if (!selection.ok) return selection;
+
+  // Credentials clone + plaintext identity bridge, delivered via a temp
+  // ZCODE_DATA_BASE_DIR root inside the attach dir.
+  const dataBaseDir = join(opts.attachDir, "zcode-data");
+  const credentialsCloneDir = join(dataBaseDir, ".zcode", "v2");
+  const bridged = { ...credentialsRecord };
+  bridged[`account-provider:${plan.providerId}:identity`] = apiKeyEntry.identity;
+  try {
+    mkdirSync(credentialsCloneDir, { recursive: true });
+    writeFileSync(join(credentialsCloneDir, "credentials.json"), JSON.stringify(bridged, null, 2), "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      code: "credentials-missing",
+      message: `ZCode: failed to write the temp credentials clone: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
 
   // Deep-clone via JSON round-trip: the source is freshly-parsed JSON anyway.
   const clone = JSON.parse(JSON.stringify(personal)) as { config?: Record<string, unknown> };
@@ -728,7 +818,13 @@ export function prepareZcodeModelBinding(opts: {
       }`,
     };
   }
-  return { ok: true, selection: selection.selection, clonePath, builtinCatalogPath: catalog.path };
+  return {
+    ok: true,
+    selection: selection.selection,
+    clonePath,
+    builtinCatalogPath: catalog.path,
+    dataBaseDir,
+  };
 }
 
 function resolveSelection(
@@ -813,11 +909,18 @@ export function zcodeProviderEnvPairSet(env: Readonly<NodeJS.ProcessEnv>): boole
 }
 
 /** Convenience: the paired env values for a prepared binding. */
+/** Env var redirecting the CLI's data base dir (holds the bridged credentials). */
+export const ZCODE_DATA_BASE_DIR_ENV = "ZCODE_DATA_BASE_DIR";
+
+/** Convenience: the THREE env values for a prepared binding — the paired
+ * provider-config files plus the temp data-base-dir carrying the identity
+ * bridge. */
 export function zcodeBindingEnv(
   result: Extract<ZcodeBindingResult, { ok: true }>,
 ): Record<string, string> {
   return {
     [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: result.clonePath,
     [ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]: result.builtinCatalogPath,
+    [ZCODE_DATA_BASE_DIR_ENV]: result.dataBaseDir,
   };
 }

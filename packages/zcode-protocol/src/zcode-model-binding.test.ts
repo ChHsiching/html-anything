@@ -445,6 +445,7 @@ describe("prepareZcodeModelBinding", () => {
     cjs: string;
     settingPath: string;
     personalPath: string;
+    credentialsPath: string;
     attachDir: string;
   } {
     const { cjs } = (function writeInstall() {
@@ -463,9 +464,18 @@ describe("prepareZcodeModelBinding", () => {
     writeFileSync(settingPath, JSON.stringify(MODERN_SETTING));
     const personalPath = join(dir, "provider_config.json");
     writeFileSync(personalPath, JSON.stringify(personalConfigFixture(extraPersonalConfig)));
+    // Mirrors the GUI-written credential keys: an oauth login token plus the
+    // coding-plan api-key key the identity bridge derives from (values are
+    // opaque — only KEY NAMES matter to the adapter).
+    const credentialsPath = join(dir, "credentials.json");
+    writeFileSync(credentialsPath, JSON.stringify({
+      "oauth:bigmodel:access_token": "enc:v1:fake",
+      "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:41641738601171874:api-key": "enc:v1:fake",
+      "account-provider:coding-plan:account:bigmodel-team-coding-plan:account:41641738601171874:api-key": "enc:v1:fake",
+    }));
     const attachDir = join(dir, "attach");
     mkdirSync(attachDir, { recursive: true });
-    return { cjs, settingPath, personalPath, attachDir };
+    return { cjs, settingPath, personalPath, credentialsPath, attachDir };
   }
 
   it("explicit pick: writes the exact selection into a temp clone; the real config file is UNTOUCHED (zero-write snapshot)", () => {
@@ -477,6 +487,7 @@ describe("prepareZcodeModelBinding", () => {
       attachDir: f.attachDir,
       settingPath: f.settingPath,
       personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     });
     expect(result.ok).toBe(true);
@@ -501,6 +512,38 @@ describe("prepareZcodeModelBinding", () => {
     expect(clone.config.providerOrder).toEqual(["new-provider", "deepseek", "42c7e100-ae54-4b64-8d9d-45ae140c57db"]);
     // ZERO-WRITE contract: the user's real file is byte-identical.
     expect(readFileSync(f.personalPath, "utf8")).toBe(before);
+
+    // Identity bridge (#41 fix): a temp ZCODE_DATA_BASE_DIR credentials clone
+    // carries a PLAINTEXT identity key derived from the GUI's api-key key name
+    // (the headless registry materializes account providers only with it).
+    const credsBefore = readFileSync(f.credentialsPath, "utf8");
+    expect(result.dataBaseDir).toBe(join(f.attachDir, "zcode-data"));
+    const bridged = JSON.parse(
+      readFileSync(join(result.dataBaseDir, ".zcode", "v2", "credentials.json"), "utf8"),
+    ) as Record<string, string>;
+    expect(bridged["account-provider:account:bigmodel-individual-coding-plan:identity"]).toBe(
+      "41641738601171874",
+    );
+    // The clone keeps the real encrypted values verbatim.
+    expect(bridged["oauth:bigmodel:access_token"]).toBe("enc:v1:fake");
+    // ZERO-WRITE on credentials too.
+    expect(readFileSync(f.credentialsPath, "utf8")).toBe(credsBefore);
+  });
+
+  it("no coding-plan api-key credential → credentials-missing refusal (identity bridge has no raw material)", () => {
+    const f = fixtureTree();
+    writeFileSync(f.credentialsPath, JSON.stringify({ "oauth:bigmodel:access_token": "enc:v1:fake" }));
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      attachDir: f.attachDir,
+      settingPath: f.settingPath,
+      personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
+      cacheRoot: join(dir, "no-cache"),
+    });
+    expect(result).toMatchObject({ ok: false, code: "credentials-missing" });
+    if (result.ok) return;
+    expect(result.message).toContain("log in to your Coding Plan");
   });
 
   it("default pick without a configured default → plan's first model + LAST level (completeNewModelSelection convention)", () => {
@@ -510,6 +553,7 @@ describe("prepareZcodeModelBinding", () => {
       attachDir: f.attachDir,
       settingPath: f.settingPath,
       personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     });
     expect(result.ok).toBe(true);
@@ -534,6 +578,7 @@ describe("prepareZcodeModelBinding", () => {
       attachDir: f.attachDir,
       settingPath: f.settingPath,
       personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     });
     expect(result.ok).toBe(true);
@@ -554,6 +599,7 @@ describe("prepareZcodeModelBinding", () => {
       attachDir: f.attachDir,
       settingPath: f.settingPath,
       personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     });
     expect(result.ok).toBe(true);
@@ -567,6 +613,7 @@ describe("prepareZcodeModelBinding", () => {
       cjsPath: f.cjs,
       attachDir: f.attachDir,
       personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     };
     // 1. GUI keys missing.
@@ -616,6 +663,7 @@ describe("prepareZcodeModelBinding", () => {
       attachDir: f.attachDir,
       settingPath: f.settingPath,
       personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     });
     expect(result).toMatchObject({ ok: false, code: "level-unavailable" });
@@ -629,6 +677,7 @@ describe("prepareZcodeModelBinding", () => {
       attachDir: f.attachDir,
       settingPath: f.settingPath,
       personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     });
     expect(result).toMatchObject({ ok: false, code: "model-not-in-plan" });
@@ -698,7 +747,12 @@ describe("binding discriminator (live-proven, 2026-09-21/22)", () => {
       // (credentials key names are the login signal that resolves the family).
       writeFileSync(settingPath, JSON.stringify(LEGACY_SETTING));
       const credentialsPath = join(dir, "credentials.json");
-      writeFileSync(credentialsPath, JSON.stringify({ "oauth:bigmodel:access_token": "enc:x" }));
+      // Probe machine truth: bigmodel login + the GUI-written coding-plan
+      // api-key key (the identity bridge's raw material).
+      writeFileSync(credentialsPath, JSON.stringify({
+        "oauth:bigmodel:access_token": "enc:x",
+        "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:41641738601171874:api-key": "enc:x",
+      }));
       const personalPath = join(dir, "provider_config.json");
       writeFileSync(personalPath, JSON.stringify(personalConfigFixture()));
       const attachDir = join(dir, "attach");
