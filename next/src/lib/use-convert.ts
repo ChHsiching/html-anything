@@ -113,6 +113,11 @@ export function useConvert() {
         const dec = new TextDecoder();
         let buf = "";
         let lastEvent = "";
+        // #41 zcode gate: a refused binding / failed turn must end the task in
+        // the RED error state, not a fake-green "done". Other agents keep the
+        // historical behavior (their CLIs may exit non-zero after usable
+        // output; html-anything does not re-interpret them here).
+        let turnFailed = false;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -139,15 +144,16 @@ export function useConvert() {
             } catch {
               continue;
             }
-            handleEvent(taskId, event, data, startedAt);
+            if (handleEvent(taskId, event, data, startedAt, req.agent)) turnFailed = true;
           }
         }
         const endedAt = Date.now();
         useStore.getState().patchStatsFor(taskId, { endedAt, durationMs: endedAt - startedAt });
-        useStore.getState().setStatusFor(taskId, "done");
+        useStore.getState().setStatusFor(taskId, turnFailed ? "error" : "done");
         // record the just-finished (content, html) as the new diff-edit baseline
         // so the user's next edit goes through diff mode instead of full regen
-        useStore.getState().commitBaseFor(taskId);
+        // (never on a failed turn — the partial output is not a baseline)
+        if (!turnFailed) useStore.getState().commitBaseFor(taskId);
       } catch (err) {
         if ((err as Error)?.name === "AbortError") {
           useStore.getState().pushLogFor(taskId, { kind: "info", text: "已取消" });
@@ -169,7 +175,38 @@ export function useConvert() {
   return { run, cancel };
 }
 
-function handleEvent(taskId: string, event: string, data: unknown, startedAt: number) {
+/**
+ * #41 zcode gate: does this SSE event mark the turn FAILED? An `error` event
+ * (refused binding / spawn failure / stream error) or a non-zero exit, GATED
+ * ON ZCODE ONLY — other agents keep the historical behavior (their CLIs may
+ * exit non-zero after usable output; the app does not re-interpret them
+ * here). Exported for unit tests.
+ */
+export function zcodeTurnFailed(
+  agent: string,
+  event: string,
+  data: Record<string, unknown>,
+): boolean {
+  if (agent !== "zcode") return false;
+  if (event === "error") return true;
+  if (event === "done") {
+    const code = data.code;
+    return code != null && code !== 0;
+  }
+  return false;
+}
+
+/**
+ * Fold one SSE event into the task's log/stats. Returns true when the event
+ * marks the turn failed (see {@link zcodeTurnFailed}).
+ */
+function handleEvent(
+  taskId: string,
+  event: string,
+  data: unknown,
+  startedAt: number,
+  agent: string,
+): boolean {
   const d = data as Record<string, unknown>;
   const store = useStore.getState();
   const elapsed = Date.now() - startedAt;
@@ -276,6 +313,7 @@ function handleEvent(taskId: string, event: string, data: unknown, startedAt: nu
       break;
     }
   }
+  return zcodeTurnFailed(agent, event, d);
 }
 
 function formatBytes(n: number) {

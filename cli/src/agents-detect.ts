@@ -1,7 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join, posix, win32 } from "node:path";
-import { readZcodeModelPicker } from "@html-anything/zcode-protocol/zcode-model-picker";
+import {
+  readZcodePlanModelOptions,
+  readZcodeReadyState,
+  type ZcodeNotReadyReason,
+} from "@html-anything/zcode-protocol/zcode-model-binding";
 
 /**
  * Agent detection — adapted from next/src/lib/agents/detect.ts
@@ -334,9 +338,9 @@ export const AGENTS: AgentDef[] = [
   // invoke trunk like every argv-family agent.
   //
   // fallbackModels is the static [DEFAULT_MODEL] floor: the CLI has no
-  // --model flag, so the model default lives entirely in ZCode's own
-  // provider config. (detectAgents below still overlays the dynamic picker
-  // read while available; that surface is scheduled for removal.)
+  // --model flag, so per-turn model selection travels as a
+  // defaultModelSelection clone (see detectAgents' argv-attach branch +
+  // the invoke layer's binding, #41).
   {
     id: "zcode",
     label: "ZCode",
@@ -714,6 +718,13 @@ export type DetectedAgent = {
   protocol: AgentProtocol;
   models: ModelOption[];
   unsupported?: boolean;
+  /**
+   * ZCode-only (#41): installed ≠ ready. True when the GUI plan resolves AND
+   * its family is logged in; false with `notReadyReason` when the user still
+   * needs to open/log into the GUI. Absent for every other agent.
+   */
+  ready?: boolean;
+  notReadyReason?: ZcodeNotReadyReason;
 };
 
 export function detectAgents(): DetectedAgent[] {
@@ -742,27 +753,35 @@ export function detectAgents(): DetectedAgent[] {
     // is terminal and present whenever detect passed (zcode.cjs found ⟺ ZCode
     // installed ⟺ exe exists), so there is no null to coalesce here.
     //
-    // The picker is still populated DYNAMICALLY from ~/.zcode/v2/config.json
-    // while ZCode is available (overlay scheduled for removal together with
-    // the protocol package). The read is gated on the same availability (an
-    // unavailable install keeps the static [DEFAULT_MODEL] floor, so the
-    // picker never crashes on a missing config). readZcodeModelPicker()
-    // filters to enabled providers with no systemDisabledReason (the GUI's
-    // resolved, usable set) and returns each model with its providerId.
-    // model-providers.json is deliberately NOT read (static catalog with
-    // empty apiKeys → would offer unusable models).
+    // #41 — the picker lists the GUI-selected PLAN's models × reasoning
+    // levels, read from setting.json + the install-bundled catalog (the same
+    // sources the invoke layer binds against — see
+    // zcode-model-binding.ts). Chips carry ids of the form
+    // "<modelId>@<level>" plus the plan providerId; the "default" entry binds
+    // the plan's own default at invoke time. Reads are gated on availability
+    // (an unavailable install keeps the static [DEFAULT_MODEL] floor, and a
+    // not-ready install — GUI never opened / not logged in — surfaces
+    // ready:false + notReadyReason while keeping whatever plan chips
+    // resolved).
     if (protocol === "argv-attach") {
       const cjs = resolveZcodeBin();
       if (cjs) {
-        const { models: pickerModels } = readZcodeModelPicker();
+        const readyState = readZcodeReadyState();
+        const planModels = readyState.plan
+          ? readZcodePlanModelOptions({ cjsPath: cjs, plan: readyState.plan })
+          : [];
         return {
           ...base,
           available: true,
           path: cjs,
           resolvedBin: resolveZcodeNodeBin(),
-          // [DEFAULT_MODEL] floor + each enabled provider's models (carrying
-          // providerId for the invoke-layer {providerId, modelId} resolution).
-          models: [DEFAULT_MODEL, ...pickerModels],
+          ready: readyState.ready,
+          notReadyReason: readyState.reason ?? undefined,
+          // Plan chips when they resolved (Default chip first); otherwise the
+          // static [DEFAULT_MODEL] floor.
+          models: planModels.length
+            ? [{ id: "default", label: "Default (ZCode GUI plan)" }, ...planModels]
+            : [DEFAULT_MODEL],
         };
       }
       return { ...base, available: false };

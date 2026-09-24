@@ -350,11 +350,18 @@ function AgentCard({
   const t = useT();
   const proto = PROTOCOL_KEY[agent.protocol];
   const gradient = VENDOR_GRADIENT[agent.vendor] ?? "from-[var(--ink)] to-[var(--ink-soft)]";
+  // #41: installed ≠ ready (ZCode). Amber ring + badge + one-line guidance
+  // instead of discovering the problem by hitting Generate.
+  const notReady = agent.available && agent.ready === false;
   return (
     <button
       onClick={onClick}
       className={`group relative flex items-start gap-3 rounded-2xl p-4 text-left transition-all ${
-        selected ? "ring-2 ring-[var(--coral)]" : "ring-1 ring-[var(--line-soft)] hover:ring-[var(--ink)]/30"
+        notReady
+          ? "ring-2 ring-[var(--amber)]"
+          : selected
+            ? "ring-2 ring-[var(--coral)]"
+            : "ring-1 ring-[var(--line-soft)] hover:ring-[var(--ink)]/30"
       }`}
       style={{ background: "var(--surface)" }}
     >
@@ -371,12 +378,26 @@ function AgentCard({
               {t("agent.selected")}
             </span>
           )}
+          {notReady && (
+            <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--amber)] shrink-0">
+              {t("agent.notReady")}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 text-[11px] text-[var(--ink-faint)] mt-0.5">
           <span>{agent.vendor}</span>
           <span>·</span>
           <span className={proto.tone === "warn" ? "text-[var(--coral)]" : ""}>{t(proto.key)}</span>
         </div>
+        {notReady && agent.notReadyReason && (
+          <div className="text-[11px] leading-snug text-[var(--amber)] mt-1.5">
+            {t(
+              agent.notReadyReason === "gui-not-initialized"
+                ? "agent.notReady.guiNotInitialized"
+                : "agent.notReady.notLoggedIn",
+            )}
+          </div>
+        )}
         {agent.path && (
           <div
             className="font-mono text-[10px] text-[var(--ink-mute)] mt-1.5 truncate"
@@ -420,11 +441,19 @@ function ModelPicker({
           </div>
         </div>
         <div className="text-[10.5px] text-[var(--ink-mute)] max-w-[220px] text-right leading-snug">
-          {t("model.defaultHint.prefix")}
-          <code className="px-1 rounded bg-[var(--surface)] border border-[var(--line-faint)]">
-            --model
-          </code>
-          {t("model.defaultHint.suffix")}
+          {agent.protocol === "argv-attach" ? (
+            // #41: ZCode has no --model flag — the hint must describe the
+            // temp-clone binding truthfully, not the sibling CLIs' flag.
+            t("model.defaultHint.zcode")
+          ) : (
+            <>
+              {t("model.defaultHint.prefix")}
+              <code className="px-1 rounded bg-[var(--surface)] border border-[var(--line-faint)]">
+                --model
+              </code>
+              {t("model.defaultHint.suffix")}
+            </>
+          )}
         </div>
       </div>
       <div className="flex flex-wrap gap-1.5">

@@ -3,6 +3,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveOnPath, resolveZcodeBin, resolveZcodeNodeBin, ZCODE_CJS_SENTINEL, AGENTS } from "./agents-detect.js";
+import {
+  prepareZcodeModelBinding,
+  zcodeBindingEnv,
+  zcodeProviderEnvPairSet,
+} from "@html-anything/zcode-protocol/zcode-model-binding";
 
 export type InvokeOpts = {
   agent: string;
@@ -696,7 +701,10 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       // limits, so it travels as a temp-file attachment — the `.md` enters the
       // model context whole (live-proven). `-p` (buildArgv) already carries
       // the fixed short guide. The mkdtemp dir is removed on every exit path
-      // via cleanupArgvAttach (close / error / abort / cancel).
+      // via cleanupArgvAttach (close / error / abort / cancel) — it also holds
+      // the per-turn provider-config clone below, so the binding is cleaned up
+      // with the prompt.
+      let boundModelMeta: string | null = null;
       if (promptViaAttach) {
         try {
           attachTmpDir = mkdtempSync(path.join(tmpdir(), "html-anything-zcode-"));
@@ -711,6 +719,35 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           return;
         }
         argv = [...argv, "--attach", path.join(attachTmpDir, "prompt.md")];
+
+        // #41 — deterministic per-turn model binding. ZCode's CLI has no
+        // --model flag and SILENTLY falls back to the first visible registry
+        // provider (+ max reasoning) when a config default is absent/invalid,
+        // which can route the turn to a provider the user never chose. Every
+        // turn therefore writes its model selection into a TEMP CLONE of the
+        // user's provider config (real file never touched) and hands the
+        // child the PAIRED ZCODE_*_PROVIDER_CONFIG_FILE vars (the CLI
+        // hard-requires the pair; "读哪份传哪份" — the builtin var points at
+        // the very catalog file the selection was validated against). A user
+        // who pre-set the pair keeps it untouched (zero-code reroute); any
+        // broken link in the resolution chain refuses the spawn with an
+        // actionable error — never a silent reroute. See
+        // zcode-model-binding.ts for the live-proven mechanism.
+        if (!zcodeProviderEnvPairSet(process.env)) {
+          const binding = prepareZcodeModelBinding({
+            cjsPath: cjsPath!,
+            model: opts.model,
+            attachDir: attachTmpDir,
+          });
+          if (!binding.ok) {
+            safeEnqueue({ type: "error", message: binding.message });
+            cleanupArgvAttach();
+            safeClose();
+            return;
+          }
+          Object.assign(env, zcodeBindingEnv(binding));
+          boundModelMeta = `${binding.selection.modelId}@${binding.selection.reasoningLevel}`;
+        }
       }
 
       // node-script CLIs (ZCode's zcode.cjs) run as `node <cjs> -p …`;
@@ -767,6 +804,12 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         argv: fullArgv,
         promptBytes: Buffer.byteLength(opts.prompt, "utf8"),
       });
+      // The bound model as resolved by the #41 binding (ZCode's stream emits
+      // no model/session start meta of its own). Surfaced so the log shows
+      // which model×level the turn was pinned to.
+      if (boundModelMeta) {
+        safeEnqueue({ type: "meta", key: "model", value: boundModelMeta });
+      }
 
       child.stdin.on("error", () => {});
       try {

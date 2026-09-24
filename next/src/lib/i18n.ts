@@ -69,11 +69,15 @@ export interface Dict {
   "model.label": string;
   "model.defaultHint.prefix": string;
   "model.defaultHint.suffix": string;
+  "model.defaultHint.zcode": string;
   "model.defaultLabel": string;
 
   // Agent card
   "agent.selected": string;
   "agent.notInstalled": string;
+  "agent.notReady": string;
+  "agent.notReady.guiNotInitialized": string;
+  "agent.notReady.notLoggedIn": string;
   "agent.customBin.eyebrow": string;
   "agent.customBin.subtitle": string;
   "agent.customBin.detected": string;
@@ -430,10 +434,17 @@ const en: Dict = {
   "model.label": "Pick a model for {agent}",
   "model.defaultHint.prefix": "Default omits ",
   "model.defaultHint.suffix": " and lets the CLI pick.",
+  "model.defaultHint.zcode":
+    "Every generation is pinned to the picked model × thinking level via ZCode's own config (temp copy); Default follows the current plan in the ZCode GUI.",
   "model.defaultLabel": "Default (CLI config)",
 
   "agent.selected": "Selected",
   "agent.notInstalled": "Not installed",
+  "agent.notReady": "Installed · not ready",
+  "agent.notReady.guiNotInitialized":
+    "ZCode has never been opened on this machine. Open the ZCode GUI once, log in and pick a model, then rescan.",
+  "agent.notReady.notLoggedIn":
+    "ZCode is installed but not logged in / no model selected. Open the ZCode GUI, log in and pick a model, then rescan.",
   "agent.customBin.eyebrow": "custom path",
   "agent.customBin.subtitle": "Override the auto-detected binary for {agent}",
   "agent.customBin.detected": "Auto-detected:",
@@ -793,10 +804,17 @@ const zhCN: Dict = {
   "model.label": "为 {agent} 选个模型",
   "model.defaultHint.prefix": "选 Default 时不传 ",
   "model.defaultHint.suffix": ", 由 CLI 自己挑",
+  "model.defaultHint.zcode":
+    "每次生成都通过 ZCode 自己的配置（临时副本）绑定所选模型 × 思考档位；Default 跟随 ZCode GUI 当前计划。",
   "model.defaultLabel": "Default (CLI config)",
 
   "agent.selected": "SELECTED",
   "agent.notInstalled": "未安装",
+  "agent.notReady": "已安装 · 未就绪",
+  "agent.notReady.guiNotInitialized":
+    "本机从未打开过 ZCode。请先打开 ZCode GUI 并登录、选择一个模型，然后重新扫描。",
+  "agent.notReady.notLoggedIn":
+    "ZCode 已安装但尚未登录 / 未选择模型。请打开 ZCode GUI 登录并选择一个模型，然后重新扫描。",
   "agent.customBin.eyebrow": "自定义路径",
   "agent.customBin.subtitle": "手动指定 {agent} 的二进制路径",
   "agent.customBin.detected": "自动检测到:",

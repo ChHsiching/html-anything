@@ -25,6 +25,13 @@ export type AgentInfo = {
   models: ModelOption[];
   /** True for ACP / pi-rpc adapters where Convert returns a friendly error. */
   unsupported?: boolean;
+  /**
+   * ZCode-only (#41): installed ≠ ready — true when the GUI plan resolves and
+   * its family is logged in. False + notReadyReason renders the amber
+   * "已安装 · 未就绪" card state. Absent for every other agent.
+   */
+  ready?: boolean;
+  notReadyReason?: import("@html-anything/zcode-protocol/zcode-model-binding").ZcodeNotReadyReason;
 };
 
 export type ConvertStatus = "idle" | "running" | "done" | "error";

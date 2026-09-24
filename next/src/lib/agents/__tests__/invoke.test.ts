@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 
-const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockRmSync } = vi.hoisted(() => {
+const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockRmSync, mockPrepareBinding, bindingOkResult } = vi.hoisted(() => {
   return {
     mockSpawn: vi.fn(),
     existsSyncDelegate: vi.fn((p: string) => p === "/bin/sh"),
@@ -19,6 +19,21 @@ const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockR
     mockMkdtempSync: vi.fn((prefix: string) => `${prefix}TEST`),
     mockWriteFileSync: vi.fn(),
     mockRmSync: vi.fn(),
+    // #41: the per-turn model binding seam. invoke calls ONE function from
+    // the protocol package; everything else in that module stays real (the
+    // T3/#29 unmocked-export lesson). The ok-result is the shape a real
+    // prepared binding returns; refusal tests swap `mockPrepareBinding.mockReturnValue`.
+    mockPrepareBinding: vi.fn(),
+    bindingOkResult: {
+      ok: true as const,
+      selection: {
+        providerId: "account:bigmodel-individual-coding-plan",
+        modelId: "GLM-5.2",
+        reasoningLevel: "high",
+      },
+      clonePath: "/tmp/attach/provider-config.clone.json",
+      builtinCatalogPath: "/install/resources/config/provider/zcode-builtin.json",
+    },
   };
 });
 
@@ -36,6 +51,13 @@ vi.mock("node:fs", async () => {
     writeFileSync: mockWriteFileSync,
     rmSync: mockRmSync,
   };
+});
+
+vi.mock("@html-anything/zcode-protocol/zcode-model-binding", async () => {
+  const actual = await vi.importActual<
+    typeof import("@html-anything/zcode-protocol/zcode-model-binding")
+  >("@html-anything/zcode-protocol/zcode-model-binding");
+  return { ...actual, prepareZcodeModelBinding: mockPrepareBinding };
 });
 
 import { invokeAgent, type InvokeEvent } from "../invoke";
@@ -136,6 +158,13 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     // an absolute `.exe`-style path, so the spawn takes the DIRECT (no-shell)
     // Windows path — argv passes verbatim on every host platform.
     vi.stubEnv("ZCODE_BIN", "/resolved/zcode.cjs");
+    // The host may carry the GUI-inherited provider-config PAIR (running the
+    // tests inside a ZCode-spawned terminal exports ZCODE_PERSONAL/_BUILTIN_
+    // PROVIDER_CONFIG_FILE to children — the same host pollution the #41
+    // probes hit). Force it ABSENT so the binding-active tests are
+    // deterministic on every host; the passthrough test stubs the pair back on.
+    delete process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE;
+    delete process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE;
     existsSyncDelegate.mockImplementation((p: string) =>
       p === "/resolved/node.exe" ||
       p === "/resolved/zcode.cjs" ||
@@ -145,6 +174,9 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     mockMkdtempSync.mockClear();
     mockWriteFileSync.mockClear();
     mockRmSync.mockClear();
+    // #41: default happy-path binding (refusal tests override the return).
+    mockPrepareBinding.mockReset();
+    mockPrepareBinding.mockReturnValue(bindingOkResult);
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -236,6 +268,109 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     );
   });
 
+  // #41 — the per-turn model binding: the PAIRED provider-config env vars ride
+  // the spawn env (personal → the temp clone, builtin → the catalog file the
+  // selection was validated against), and the bound model surfaces as a meta
+  // event so the log shows what the turn was pinned to.
+  it("delivers the paired ZCODE_*_PROVIDER_CONFIG_FILE env vars + a bound-model meta event", async () => {
+    const { child, stdout } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "build it",
+      model: "GLM-5.2@high",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+    const events = await eventsPromise;
+
+    // The binding got the picker id and the attach temp dir (clone lives there).
+    expect(mockPrepareBinding).toHaveBeenCalledWith(
+      expect.objectContaining({ cjsPath: "/resolved/zcode.cjs", model: "GLM-5.2@high", attachDir: attachDir() }),
+    );
+    const [, , spawnOpts] = mockSpawn.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { env: Record<string, string> },
+    ];
+    expect(spawnOpts.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBe(
+      bindingOkResult.clonePath,
+    );
+    expect(spawnOpts.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe(
+      bindingOkResult.builtinCatalogPath,
+    );
+    expect(spawnOpts.env.ELECTRON_RUN_AS_NODE).toBe("1");
+    // Bound model meta right after start (ZCode's own stream has no model meta).
+    const meta = events.find((e) => e.type === "meta" && e.key === "model");
+    expect(meta).toMatchObject({ type: "meta", key: "model", value: "GLM-5.2@high" });
+  });
+
+  // #41 — fail-refuse: a broken link in the resolution chain refuses the spawn
+  // with the actionable error instead of silently falling back to whatever the
+  // CLI would pick on its own.
+  it("refuses to spawn when the binding resolution fails (error event, no spawn, temp cleaned)", async () => {
+    mockPrepareBinding.mockReturnValue({
+      ok: false,
+      code: "gui-keys-missing",
+      message: "ZCode: no model plan found in the GUI settings. Open ZCode, log in and select a model (e.g. your Coding Plan), then retry.",
+    });
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "build it",
+      binOverride: "/resolved/node.exe",
+    });
+
+    const events = await collectStream(stream);
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "error",
+      message: expect.stringContaining("Open ZCode"),
+    });
+    // The attach temp dir (holding the would-be clone) is cleaned on refusal.
+    expect(mockRmSync).toHaveBeenCalledWith(attachDir(), expect.anything());
+  });
+
+  // #41 — escape hatch: a user who pre-set BOTH provider-config vars keeps
+  // them verbatim (zero-code reroute); the adapter neither overrides them nor
+  // prepares its own binding.
+  it("passes a user-set env PAIR through untouched and skips its own binding", async () => {
+    vi.stubEnv("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "/user/personal.json");
+    vi.stubEnv("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", "/user/builtin.json");
+    const { child, stdout } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "build it",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+    await eventsPromise;
+
+    expect(mockPrepareBinding).not.toHaveBeenCalled();
+    const [, , spawnOpts] = mockSpawn.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { env: Record<string, string> },
+    ];
+    expect(spawnOpts.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBe("/user/personal.json");
+    expect(spawnOpts.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe("/user/builtin.json");
+  });
+
   it("bridges model.streaming text_delta lines to {type:'delta'} and safely drops noise lines", async () => {
     const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
@@ -259,9 +394,12 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(deltas.map((d) => (d as { text: string }).text)).toEqual(["PRO", "BE", "_OK"]);
     // Noise envelope lines (session.updated hook frames …), turn.completed,
     // and the bare result terminator produce NOTHING — dropped, not forwarded
-    // as raw / meta / error events.
+    // as raw / meta / error events. (The ONE meta event is the #41 bound-model
+    // line emitted after start — not parser output.)
     expect(events.filter((e) => e.type === "raw")).toEqual([]);
-    expect(events.filter((e) => e.type === "meta")).toEqual([]);
+    expect(
+      events.filter((e) => e.type === "meta" && e.key !== "model"),
+    ).toEqual([]);
     expect(events.filter((e) => e.type === "error")).toEqual([]);
     expect(events[events.length - 1]).toMatchObject({ type: "done", code: 0 });
   });

@@ -8,6 +8,7 @@
     ".": "./src/zcode-protocol.ts",
     "./zcode-protocol": "./src/zcode-protocol.ts",
     "./zcode-config": "./src/zcode-config.ts",
+    "./zcode-model-binding": "./src/zcode-model-binding.ts",
     "./zcode-model-picker": "./src/zcode-model-picker.ts",
     "./zcode-session": "./src/zcode-session.ts",
     "./zcode-stream": "./src/zcode-stream.ts"
