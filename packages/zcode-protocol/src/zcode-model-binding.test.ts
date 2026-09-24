@@ -18,6 +18,7 @@ import {
   parseZcodePlanSelection,
   prepareZcodeModelBinding,
   readZcodeLoggedInFamilies,
+  readZcodePlanDefaultChoice,
   readZcodePlanModelOptions,
   readZcodeReadyState,
   resolveZcodeCatalogFile,
@@ -416,6 +417,108 @@ describe("readZcodePlanModelOptions (detect-surface composition)", () => {
       expect(readZcodePlanModelOptions({ cjsPath: cjs, plan: plan!, cacheRoot: join(dir, "no-cache") })).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readZcodePlanDefaultChoice (Default-chip label source)", () => {
+  function defaultChoiceTree(extraPersonalConfig: Record<string, unknown> = {}): {
+    dir: string;
+    cjs: string;
+    personalPath: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "zcode-plan-default-"));
+    const install = join(dir, "install");
+    mkdirSync(join(install, "resources", "glm"), { recursive: true });
+    mkdirSync(join(install, "resources", "config", "provider"), { recursive: true });
+    const cjs = join(install, "resources", "glm", "zcode.cjs");
+    writeFileSync(cjs, "");
+    writeFileSync(
+      join(install, "resources", "config", "provider", "zcode-builtin.json"),
+      JSON.stringify(catalogFixture()),
+    );
+    const personalPath = join(dir, "provider_config.json");
+    writeFileSync(personalPath, JSON.stringify(personalConfigFixture(extraPersonalConfig)));
+    return { dir, cjs, personalPath };
+  }
+
+  it("no configured default → plan's first enabled model + LAST level (same precedence as a default pick)", () => {
+    const f = defaultChoiceTree();
+    try {
+      const plan = parseZcodePlanSelection(MODERN_SETTING);
+      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath }))
+        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "max" });
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("honours the GUI's valid defaultModelSelection (legacy provider id migrated)", () => {
+    const f = defaultChoiceTree({
+      defaultModelSelection: {
+        providerId: "builtin:bigmodel-coding-plan",
+        modelId: "GLM-5.2",
+        options: { reasoningLevel: "high" },
+      },
+    });
+    try {
+      const plan = parseZcodePlanSelection(MODERN_SETTING);
+      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath }))
+        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "high" });
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a configured default targeting ANOTHER provider → plan default (label never promises a foreign provider)", () => {
+    const f = defaultChoiceTree({
+      defaultModelSelection: { providerId: "deepseek", modelId: "deepseek-chat", options: { reasoningLevel: "high" } },
+    });
+    try {
+      const plan = parseZcodePlanSelection(MODERN_SETTING);
+      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath }))
+        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "max" });
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unreadable personal config degrades to the plan default (label-only read; invoke still refuses)", () => {
+    const f = defaultChoiceTree();
+    try {
+      const plan = parseZcodePlanSelection(MODERN_SETTING);
+      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: join(f.dir, "missing.json") }))
+        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "max" });
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unreadable catalog → null (detect keeps the generic Default label)", () => {
+    const f = defaultChoiceTree();
+    try {
+      rmSync(join(f.dir, "install", "resources", "config", "provider", "zcode-builtin.json"), { force: true });
+      const plan = parseZcodePlanSelection(MODERN_SETTING);
+      expect(readZcodePlanDefaultChoice({
+        cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath, cacheRoot: join(f.dir, "no-cache"),
+      })).toBeNull();
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a plan with no models in the catalog → null", () => {
+    const f = defaultChoiceTree();
+    try {
+      const zaiPlan = parseZcodePlanSelection({
+        providerFamilyDomain: "zai",
+        providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
+      });
+      expect(zaiPlan).not.toBeNull();
+      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: zaiPlan!, personalConfigPath: f.personalPath }))
+        .toBeNull();
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
     }
   });
 });

@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join, posix, win32 } from "node:path";
 import {
+  readZcodePlanDefaultChoice,
   readZcodePlanModelOptions,
   readZcodeReadyState,
   type ZcodeNotReadyReason,
@@ -29,16 +30,24 @@ export type AgentProtocol = "stdin" | "argv" | "argv-message" | "argv-attach" | 
 
 /**
  * A model picker entry. `id`/`label` are the universal surface every agent's
- * picker reads. `providerId` is OPTIONAL and ZCode-only (#19 / ADR-0005
- * decision 4): ZCode's dynamic picker lists models across multiple providers
- * (GLM, OpenRouter, …), and `session/create` needs `{ providerId, modelId }`
- * to bind the choice. The invoke layer recovers the `providerId` for a picked
- * `id` from this field. Absent for every other agent (their picker ids map to
- * a single provider implicitly, or go to `--model <id>`).
+ * picker reads. `providerId` is OPTIONAL and ZCode-only (#41): ZCode's plan
+ * chips belong to the GUI-selected plan's catalog provider, and the per-turn
+ * binding writes that `{ providerId, modelId, reasoningLevel }` into the
+ * provider-config clone the spawn hands the CLI. Absent for every other agent
+ * (their picker ids map to a single provider implicitly, or go to
+ * `--model <id>`).
  */
 export type ModelOption = { id: string; label: string; providerId?: string };
 
 export const DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (CLI config)" };
+
+/**
+ * ZCode's static picker floor (#38). NOT the generic {@link DEFAULT_MODEL}:
+ * ZCode has no `--model` flag and no "CLI config picks" semantics — Default
+ * always means "whatever the GUI plan's current default resolves to", so even
+ * the floor label must not imply a CLI-side default.
+ */
+const ZCODE_DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (ZCode GUI plan)" };
 
 /**
  * Sentinel placed in ZCode's `AgentDef.binArgs` where the resolved path to
@@ -337,7 +346,7 @@ export const AGENTS: AgentDef[] = [
   // actual spawn). Never marked unsupported — the adapter rides the generic
   // invoke trunk like every argv-family agent.
   //
-  // fallbackModels is the static [DEFAULT_MODEL] floor: the CLI has no
+  // fallbackModels is the static [ZCODE_DEFAULT_MODEL] floor: the CLI has no
   // --model flag, so per-turn model selection travels as a
   // defaultModelSelection clone (see detectAgents' argv-attach branch +
   // the invoke layer's binding, #41).
@@ -349,7 +358,7 @@ export const AGENTS: AgentDef[] = [
     vendor: "Z.AI",
     protocol: "argv-attach",
     binArgs: [ZCODE_CJS_SENTINEL],
-    fallbackModels: [DEFAULT_MODEL],
+    fallbackModels: [ZCODE_DEFAULT_MODEL],
   },
 ];
 
@@ -758,11 +767,13 @@ export function detectAgents(): DetectedAgent[] {
     // sources the invoke layer binds against — see
     // zcode-model-binding.ts). Chips carry ids of the form
     // "<modelId>/<level>" plus the plan providerId; the "default" entry binds
-    // the plan's own default at invoke time. Reads are gated on availability
-    // (an unavailable install keeps the static [DEFAULT_MODEL] floor, and a
-    // not-ready install — GUI never opened / not logged in — surfaces
-    // ready:false + notReadyReason while keeping whatever plan chips
-    // resolved).
+    // the plan's own default at invoke time. #38 — the Default chip LABEL
+    // names what Default currently resolves to (the same precedence the
+    // invoke layer applies), so the chip never promises something stale.
+    // Reads are gated on availability (an unavailable install keeps the
+    // static [ZCODE_DEFAULT_MODEL] floor, and a not-ready install — GUI never
+    // opened / not logged in — surfaces ready:false + notReadyReason while
+    // keeping whatever plan chips resolved).
     if (protocol === "argv-attach") {
       const cjs = resolveZcodeBin();
       if (cjs) {
@@ -770,6 +781,9 @@ export function detectAgents(): DetectedAgent[] {
         const planModels = readyState.plan
           ? readZcodePlanModelOptions({ cjsPath: cjs, plan: readyState.plan })
           : [];
+        const planDefault = readyState.plan && planModels.length
+          ? readZcodePlanDefaultChoice({ cjsPath: cjs, plan: readyState.plan })
+          : null;
         return {
           ...base,
           available: true,
@@ -777,11 +791,20 @@ export function detectAgents(): DetectedAgent[] {
           resolvedBin: resolveZcodeNodeBin(),
           ready: readyState.ready,
           notReadyReason: readyState.reason ?? undefined,
-          // Plan chips when they resolved (Default chip first); otherwise the
-          // static [DEFAULT_MODEL] floor.
+          // Plan chips when they resolved (Default chip first, labelled with
+          // the resolved default model×level); otherwise the honest static
+          // floor.
           models: planModels.length
-            ? [{ id: "default", label: "Default (ZCode GUI plan)" }, ...planModels]
-            : [DEFAULT_MODEL],
+            ? [
+                {
+                  id: "default",
+                  label: planDefault
+                    ? `Default (${planDefault.modelId}, ${planDefault.reasoningLevel})`
+                    : ZCODE_DEFAULT_MODEL.label,
+                },
+                ...planModels,
+              ]
+            : [ZCODE_DEFAULT_MODEL],
         };
       }
       return { ...base, available: false };

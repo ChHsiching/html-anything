@@ -4,6 +4,7 @@ import { useCallback, useEffect } from "react";
 import { useStore, selectActiveTask } from "@/lib/store";
 import { useT } from "@/lib/i18n";
 import { useConvert } from "@/lib/use-convert";
+import { resolveAgentModel } from "@/lib/agent-models";
 
 /**
  * Floating chip pinned to the editor / preview divider — the single Convert
@@ -24,7 +25,8 @@ export function ConvertChip() {
   const t = useT();
 
   const agentInfo = agents.find((a) => a.id === agent);
-  const model = agent ? agentModels[agent] ?? "default" : "default";
+  // #38: a stale persisted pick falls back to Default instead of being sent.
+  const model = agent ? resolveAgentModel(agentInfo?.models, agentModels[agent]) : "default";
   const canConvert =
     !!agent && !!content.trim() && status !== "running" && !agentInfo?.unsupported;
 

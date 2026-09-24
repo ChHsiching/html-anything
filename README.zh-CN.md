@@ -203,11 +203,18 @@ pnpm -F @html-anything/e2e test
 | **Qwen Coder** | `qwen` | `qwen --yolo -` |
 | **Aider** | `aider` | `aider --no-pretty --no-stream --yes-always --message-file -` |
 | **IBM Bob** | `bob` | `bob --output-format stream-json --hide-intermediary-output` |
-| **ZCode** | `node` | `<zcode.cjs> app-server`（基于 stdio 的 JSON-RPC；Electron 应用，从安装路径发现）|
+| **ZCode** | `node` | `node <zcode.cjs> -p <引导语> --attach <prompt.md> --output-format stream-json`（headless CLI 一次性模式；Electron 应用，从安装路径发现）|
 
 > 这一层的设计直接借鉴了 [`nexu-io/open-design`](https://github.com/nexu-io/open-design) 和 [`multica-ai/multica`](https://github.com/multica-ai/multica) 的 agent 检测策略：唯一被 spawn 子进程的进程是 server route，业务进程不直接 spawn；CLI 的 stdin / stdout 用 JSON-line 协议复用，每个 CLI 一个轻 adapter，统一在 [`next/src/lib/agents/argv.ts`](next/src/lib/agents/argv.ts)。
 
 只要你已经在终端里登录过对应的 CLI（例如 `claude login`、`cursor login`），HTML Anything 直接复用同一个 session，**不要求你再贴一遍 API Key**。
+
+### ZCode 相关说明
+
+- **模型选择跟随 ZCode GUI。** ZCode 的模型选择器列出 ZCode 桌面端当前计划下的模型 × 思考档位；选 `Default` 则跟随该计划的当前默认（chip 标签会写明）。在 ZCode 里切换计划后，到设置里重新扫描即可刷新列表。每轮生成都会确定性绑定到所选模型——绑定链路断掉时按明确指引报错拒绝，绝不静默改道。
+- **附件尺寸上限。** 完整 prompt 以 `.md` 附件投递；ZCode 读取附件的上限为 **256 KB / 2000 行**——超长内容可能被截断。
+- **每轮成本受插件配置影响。** ZCode 每轮加载你的插件；重度配置实测每轮多消耗约 10 万 input token、慢约 18 秒，输出目录旁还可能出现插件产物。嫌慢请在 ZCode 侧精简插件——html-anything 永不写 ZCode 的配置。
+- **生成会话保留在 ZCode 里。** 每次生成的会话在 ZCode GUI 中可见、可续聊——用 GUI 打开生成目录对应的工作区即可。
 
 ## 🎨 Skills
 

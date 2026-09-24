@@ -10,6 +10,7 @@ import {
 } from "@/lib/store";
 import { useT, type DictKey } from "@/lib/i18n";
 import { refreshTemplates } from "@/lib/templates";
+import { isStaleModelChoice, resolveAgentModel } from "@/lib/agent-models";
 
 type Props = { onClose: () => void; initialSection?: SectionId };
 
@@ -54,6 +55,7 @@ const VENDOR_GRADIENT: Record<string, string> = {
   Kilo: "from-[#16a34a] to-[#0d9488]",
   Mistral: "from-[#fb923c] to-[#ef4444]",
   Qoder: "from-[#0891b2] to-[#7c3aed]",
+  "Z.AI": "from-[#3b5bfd] to-[#9d7bff]",
 };
 
 export function SettingsModal({ onClose, initialSection = "agent" }: Props) {
@@ -185,14 +187,25 @@ function AgentSection() {
   };
 
   useEffect(() => {
-    if (!agents.length) load();
+    // #38: refresh on EVERY mount — ZCode's plan chips and readiness change
+    // with the GUI state, so a list cached from a previous mount would be
+    // stale (the same reasoning as the not-ready amber state).
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const installed = useMemo(() => agents.filter((a) => a.available), [agents]);
   const missing = useMemo(() => agents.filter((a) => !a.available), [agents]);
   const selectedAgent = installed.find((a) => a.id === selected);
-  const selectedModelId = selected ? agentModels[selected] ?? "default" : "default";
+  // #38: resolve the persisted pick against the (freshly scanned) list — a
+  // stale id renders Default active and shows the revert notice, and is never
+  // sent to the agent.
+  const selectedModelId = selected
+    ? resolveAgentModel(selectedAgent?.models, agentModels[selected])
+    : "default";
+  const staleModelPick = selectedAgent
+    ? isStaleModelChoice(selectedAgent.models, agentModels[selectedAgent.id])
+    : false;
 
   return (
     <div>
@@ -243,6 +256,7 @@ function AgentSection() {
         <ModelPicker
           agent={selectedAgent}
           modelId={selectedModelId}
+          stalePick={staleModelPick}
           onPick={(id) => setAgentModel(selectedAgent.id, id)}
         />
       )}
@@ -414,10 +428,13 @@ function AgentCard({
 function ModelPicker({
   agent,
   modelId,
+  stalePick = false,
   onPick,
 }: {
   agent: AgentInfo;
   modelId: string;
+  /** #38: the persisted pick is gone from the list — render the revert notice. */
+  stalePick?: boolean;
   onPick: (id: string) => void;
 }) {
   const t = useT();
@@ -456,6 +473,11 @@ function ModelPicker({
           )}
         </div>
       </div>
+      {stalePick && (
+        <div className="mb-2 -mt-1 text-[11px] leading-snug text-[var(--amber)]">
+          {t("model.staleNotice")}
+        </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {models.map((m) => {
           const active = m.id === modelId;

@@ -203,11 +203,18 @@ On startup we scan `PATH` (including `~/.local/bin`, `~/.bun/bin`, `/opt/homebre
 | **Qwen Coder** | `qwen` | `qwen --yolo -` |
 | **Aider** | `aider` | `aider --no-pretty --no-stream --yes-always --message-file -` |
 | **IBM Bob** | `bob` | `bob --output-format stream-json --hide-intermediary-output` |
-| **ZCode** | `node` | `<zcode.cjs> app-server` (JSON-RPC over stdio; Electron app, discovered via install path) |
+| **ZCode** | `node` | `node <zcode.cjs> -p <guide> --attach <prompt.md> --output-format stream-json` (headless CLI one-shot; Electron app, discovered via install path) |
 
 > The detection strategy and per-CLI adapter shape are borrowed directly from [`nexu-io/open-design`](https://github.com/nexu-io/open-design) and [`multica-ai/multica`](https://github.com/multica-ai/multica): one privileged process spawns CLIs, JSON-line is the wire protocol, every CLI gets a thin adapter in [`next/src/lib/agents/argv.ts`](next/src/lib/agents/argv.ts).
 
 If you've already done `claude login` / `cursor login` / `gemini auth` in your terminal, HTML Anything reuses that session. **No second copy of the API key required.**
+
+### ZCode specifics
+
+- **Model selection follows the ZCode GUI.** The ZCode picker lists the model × reasoning-level chips of the plan currently selected in the ZCode desktop app; picking `Default` follows that plan's current default (the chip label names it). Switch plans in ZCode, then re-scan in Settings to refresh the list. Every turn is deterministically bound to the picked model — a broken binding refuses with an actionable error instead of silently rerouting.
+- **Attachment size cap.** The full prompt travels as an attached `.md` file; ZCode reads attachments up to **256 KB / 2000 lines** — longer input may be truncated.
+- **Per-turn cost follows your plugin config.** ZCode loads your plugins on every turn; a heavy setup measured ~100k extra input tokens and ~18 s per turn, and plugin artifacts may appear next to the output. Trim plugins on the ZCode side if turns feel slow — html-anything never writes ZCode's config.
+- **Sessions stay in ZCode.** Every generated session remains visible (and continuable) in the ZCode GUI — open the workspace matching the generation folder.
 
 ## Skills
 

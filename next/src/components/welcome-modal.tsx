@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useStore, type AgentInfo } from "@/lib/store";
 import { useT, type DictKey } from "@/lib/i18n";
+import { isStaleModelChoice, resolveAgentModel } from "@/lib/agent-models";
 
 const PROTOCOL_KEY: Record<AgentInfo["protocol"], { key: DictKey; tone: "ok" | "warn" }> = {
   stdin: { key: "protocol.stdin", tone: "ok" },
@@ -86,6 +87,10 @@ const VENDOR_HINT: Record<string, { gradient: string; install: string }> = {
     gradient: "from-[#0891b2] to-[#7c3aed]",
     install: "brew tap qoder/cli && brew install qodercli  ·  qodercli login",
   },
+  "Z.AI": {
+    gradient: "from-[#3b5bfd] to-[#9d7bff]",
+    install: "install the ZCode desktop app  ·  open it & log in once",
+  },
 };
 
 type Props = { onClose: () => void };
@@ -130,7 +135,14 @@ export function WelcomeModal({ onClose }: Props) {
   const installed = agents.filter((a) => a.available);
   const missing = agents.filter((a) => !a.available);
   const selectedAgent = installed.find((a) => a.id === selected);
-  const selectedModelId = selected ? agentModels[selected] ?? "default" : "default";
+  // #38: resolve the persisted pick against the scanned list — a stale id
+  // renders Default active with the revert notice, and never reaches the agent.
+  const selectedModelId = selected
+    ? resolveAgentModel(selectedAgent?.models, agentModels[selected])
+    : "default";
+  const staleModelPick = selectedAgent
+    ? isStaleModelChoice(selectedAgent.models, agentModels[selectedAgent.id])
+    : false;
   const canEnter = !!selectedAgent && !selectedAgent.unsupported;
 
   const confirm = () => {
@@ -228,6 +240,7 @@ export function WelcomeModal({ onClose }: Props) {
             <ModelPicker
               agent={selectedAgent}
               modelId={selectedModelId}
+              stalePick={staleModelPick}
               onPick={(id) => setAgentModel(selectedAgent.id, id)}
             />
           )}
@@ -373,10 +386,13 @@ function AgentCard({
 function ModelPicker({
   agent,
   modelId,
+  stalePick = false,
   onPick,
 }: {
   agent: AgentInfo;
   modelId: string;
+  /** #38: the persisted pick is gone from the list — render the revert notice. */
+  stalePick?: boolean;
   onPick: (id: string) => void;
 }) {
   const t = useT();
@@ -400,11 +416,24 @@ function ModelPicker({
           </div>
         </div>
         <div className="text-[10.5px] text-[var(--ink-mute)] max-w-[200px] text-right leading-snug">
-          {t("model.defaultHint.prefix")}
-          <code className="px-1 rounded bg-[var(--surface)] border border-[var(--line-faint)]">--model</code>
-          {t("model.defaultHint.suffix")}
+          {agent.protocol === "argv-attach" ? (
+            // #38: ZCode has no --model flag — describing one would be a lie;
+            // show what Default actually does (mirrors the settings picker).
+            t("model.defaultHint.zcode")
+          ) : (
+            <>
+              {t("model.defaultHint.prefix")}
+              <code className="px-1 rounded bg-[var(--surface)] border border-[var(--line-faint)]">--model</code>
+              {t("model.defaultHint.suffix")}
+            </>
+          )}
         </div>
       </div>
+      {stalePick && (
+        <div className="mb-2 -mt-1 text-[11px] leading-snug text-[var(--amber)]">
+          {t("model.staleNotice")}
+        </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {models.map((m) => {
           const active = m.id === modelId;

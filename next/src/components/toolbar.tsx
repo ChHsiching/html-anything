@@ -2,6 +2,7 @@
 
 import { useStore } from "@/lib/store";
 import { useT } from "@/lib/i18n";
+import { resolveAgentModel } from "@/lib/agent-models";
 import { TemplatePicker } from "./template-picker";
 import { ExportMenu } from "./export-menu";
 import { LayoutModeToggle } from "./layout-mode-toggle";
@@ -26,7 +27,8 @@ export function Toolbar({
   const t = useT();
 
   const agentInfo = agents.find((a) => a.id === agent);
-  const model = agent ? agentModels[agent] ?? "default" : "default";
+  // #38: a stale persisted pick falls back to Default instead of being sent.
+  const model = agent ? resolveAgentModel(agentInfo?.models, agentModels[agent]) : "default";
 
   return (
     <header

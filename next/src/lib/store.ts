@@ -7,9 +7,9 @@ import { deleteTaskRuns, putRun } from "@/lib/history/db";
 
 /**
  * A model picker entry. Mirrors the server-side ModelOption in
- * `lib/agents/detect.ts`. `providerId` is ZCode-only (#19): the picker lists
- * models across multiple providers and the invoke layer recovers the
- * `{ providerId, modelId }` pair from it. Absent for every other agent.
+ * `lib/agents/detect.ts`. `providerId` is ZCode-only (#41): the plan chips
+ * carry the GUI-selected plan's catalog provider for the per-turn binding.
+ * Absent for every other agent.
  */
 export type ModelOption = { id: string; label: string; providerId?: string };
 

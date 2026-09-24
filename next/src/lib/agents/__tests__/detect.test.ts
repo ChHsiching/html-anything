@@ -9,7 +9,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
 import { join, posix } from "node:path";
 
-const { existsSyncMock, readFileSyncMock, bindingReadyState, bindingChips } = vi.hoisted(() => ({
+const { existsSyncMock, readFileSyncMock, bindingReadyState, bindingChips, bindingDefault } = vi.hoisted(() => ({
   existsSyncMock: vi.fn((_path?: string) => false),
   // ADR-0007: discoverZcodeAppImage reads the XDG `.desktop` entry. Mocked so
   // the discover tests don't touch disk; the pure parser (parseZcodeDesktopExec)
@@ -35,6 +35,14 @@ const { existsSyncMock, readFileSyncMock, bindingReadyState, bindingChips } = vi
     { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
     { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
   ],
+  // #38: what the Default chip resolves to (mocked counterpart of
+  // readZcodePlanDefaultChoice; `.choice = null` keeps the generic label).
+  bindingDefault: {
+    choice: { modelId: "GLM-5.2", reasoningLevel: "max" } as null | {
+      modelId: string;
+      reasoningLevel: string;
+    },
+  },
 }));
 
 vi.mock("node:fs", async () => {
@@ -43,7 +51,7 @@ vi.mock("node:fs", async () => {
 });
 
 // #41: detect reads the plan picker + ready state via the protocol package's
-// binding module. Mock ONLY the two IO readers; everything else stays the
+// binding module. Mock ONLY the IO readers; everything else stays the
 // real implementation so future exports keep working under this mock (the
 // T3/#29 unmocked-export lesson).
 vi.mock("@html-anything/zcode-protocol/zcode-model-binding", async () => {
@@ -54,6 +62,7 @@ vi.mock("@html-anything/zcode-protocol/zcode-model-binding", async () => {
     ...actual,
     readZcodeReadyState: () => bindingReadyState,
     readZcodePlanModelOptions: () => bindingChips,
+    readZcodePlanDefaultChoice: () => bindingDefault.choice,
   };
 });
 
@@ -90,6 +99,7 @@ beforeEach(() => {
     kind: "individual-coding-plan",
     providerId: "account:bigmodel-individual-coding-plan",
   };
+  bindingDefault.choice = { modelId: "GLM-5.2", reasoningLevel: "max" };
 });
 
 // Real value captured once at module load; restore after each platform-stubbing
@@ -243,16 +253,13 @@ describe("ZCode agent registration (T7)", () => {
     expect(zcode.resolvedBin).toBe("C:\\Program Files\\ZCode\\ZCode.exe");
   });
 
-  // #19 / ADR-0005 decision 4: the ZCode picker is populated DYNAMICALLY from
-  // ~/.zcode/v2/config.json (the GUI's resolved config), NOT the static
-  // [DEFAULT_MODEL] floor. Every `enabled` provider with no
-  // systemDisabledReason contributes its models; DEFAULT_MODEL is prepended
-  // (= no `model` field → workspace default). The mocked reader returns the
   // #41: the picker lists the GUI plan's models × reasoning levels (from
   // setting.json + the bundled catalog via zcode-model-binding), encoded as
-  // "<modelId>@<level>" ids carrying the plan providerId, with a Default
-  // entry (binds the plan's own default at invoke time) first.
-  it("picker models are the plan's models × levels; ids encode modelId@level", () => {
+  // "<modelId>/<level>" ids carrying the plan providerId, with a Default
+  // entry first. #38: the Default chip LABEL names what Default resolves to
+  // right now (the resolved default model×level), so it is never a stale
+  // promise.
+  it("picker models are the plan's models × levels; Default chip labelled with the resolved default", () => {
     vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
     stubPlatform("linux");
     existsSyncMock.mockImplementation((p) => p === "/opt/zcode/zcode.cjs");
@@ -264,13 +271,30 @@ describe("ZCode agent registration (T7)", () => {
     expect(zcode.ready).toBe(true);
     expect(zcode.notReadyReason).toBeUndefined();
     expect(zcode.models).toEqual([
-      { id: "default", label: "Default (ZCode GUI plan)" },
+      { id: "default", label: "Default (GLM-5.2, max)" },
       { id: "GLM-5.2/disabled", label: "GLM-5.2 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
       { id: "GLM-5.2/high", label: "GLM-5.2 (high)", providerId: "account:bigmodel-individual-coding-plan" },
       { id: "GLM-5.2/max", label: "GLM-5.2 (max)", providerId: "account:bigmodel-individual-coding-plan" },
       { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
       { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
     ]);
+  });
+
+  // #38: when the default choice cannot be resolved (catalog/plan table
+  // empty at the label seam), the Default chip falls back to the generic
+  // plan label instead of promising a model it cannot name.
+  it("unresolvable default choice → generic Default (ZCode GUI plan) label", () => {
+    vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
+    stubPlatform("linux");
+    existsSyncMock.mockImplementation((p) => p === "/opt/zcode/zcode.cjs");
+    bindingDefault.choice = null;
+
+    const agents = detectAgents();
+    const zcode = findAgent(agents, "zcode");
+
+    expect(zcode.available).toBe(true);
+    expect(zcode.models[0]).toEqual({ id: "default", label: "Default (ZCode GUI plan)" });
+    expect(zcode.models.length).toBe(6); // chips still listed
   });
 
   // #41: installed ≠ ready. Not logged in / GUI never opened → ready:false +
@@ -289,13 +313,13 @@ describe("ZCode agent registration (T7)", () => {
     expect(zcode.available).toBe(true);
     expect(zcode.ready).toBe(false);
     expect(zcode.notReadyReason).toBe("not-logged-in");
-    expect(zcode.models[0]).toEqual({ id: "default", label: "Default (ZCode GUI plan)" });
+    expect(zcode.models[0]).toEqual({ id: "default", label: "Default (GLM-5.2, max)" });
     expect(zcode.models.length).toBe(6); // default + 3 + 2 level chips
   });
 
   // #41: no plan resolvable (GUI never opened / no selection keys) → the
-  // static [DEFAULT_MODEL] floor even though the install is available.
-  it("plan unresolvable: picker falls back to [DEFAULT_MODEL] floor", () => {
+  // static honest floor even though the install is available.
+  it("plan unresolvable: picker falls back to the static honest floor", () => {
     vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
     stubPlatform("linux");
     existsSyncMock.mockImplementation((p) => p === "/opt/zcode/zcode.cjs");
@@ -309,14 +333,14 @@ describe("ZCode agent registration (T7)", () => {
     expect(zcode.available).toBe(true);
     expect(zcode.ready).toBe(false);
     expect(zcode.notReadyReason).toBe("gui-not-initialized");
-    expect(zcode.models).toEqual([DEFAULT_MODEL]);
+    expect(zcode.models).toEqual([{ id: "default", label: "Default (ZCode GUI plan)" }]);
   });
 
   // When ZCode is NOT available (no install found), the picker still surfaces
-  // the static [DEFAULT_MODEL] floor — the config read is gated on the same
-  // availability as the rest of ZCode's detection, so an unavailable install
-  // doesn't crash the picker with a spurious config read.
-  it("picker falls back to [DEFAULT_MODEL] when ZCode is unavailable (config read gated)", () => {
+  // the static floor — the config read is gated on the same availability as
+  // the rest of ZCode's detection, so an unavailable install doesn't crash
+  // the picker with a spurious config read.
+  it("picker falls back to the static floor when ZCode is unavailable (config read gated)", () => {
     stubPlatform("darwin");
     existsSyncMock.mockReturnValue(false);
 
@@ -324,7 +348,7 @@ describe("ZCode agent registration (T7)", () => {
     const zcode = findAgent(agents, "zcode");
 
     expect(zcode.available).toBe(false);
-    expect(zcode.models).toEqual([DEFAULT_MODEL]);
+    expect(zcode.models).toEqual([{ id: "default", label: "Default (ZCode GUI plan)" }]);
   });
 
   it("resolveZcodeBin() honours ZCODE_BIN override", () => {

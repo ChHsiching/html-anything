@@ -610,6 +610,39 @@ export function readZcodePlanModelOptions(opts: {
   );
 }
 
+/**
+ * What the "Default" chip currently resolves to for this plan — the same
+ * precedence {@link prepareZcodeModelBinding} applies to a default pick: the
+ * GUI's own `defaultModelSelection` when it validly targets the plan (legacy
+ * provider ids migrated), else the plan's first enabled model with its last
+ * reasoning level. Read-only (never touches the credential store); shared by
+ * the next + cli detect mirrors so the Default chip label cannot drift from
+ * what the invoke layer actually binds (#38).
+ */
+export interface ZcodePlanDefaultChoice {
+  modelId: string;
+  reasoningLevel: string;
+}
+
+/**
+ * Resolve {@link ZcodePlanDefaultChoice} for a resolved cjs + plan. Returns
+ * `null` when the catalog is unreadable or the plan table holds no model with
+ * a usable level — detect then keeps the generic default label and the
+ * invoke-time refusal surfaces the actionable error.
+ */
+export function readZcodePlanDefaultChoice(opts: {
+  cjsPath: string;
+  plan: ZcodePlanSelection;
+  personalConfigPath?: string;
+  cacheRoot?: string;
+}): ZcodePlanDefaultChoice | null {
+  const catalog = resolveZcodeCatalogFile({ cjsPath: opts.cjsPath, cacheRoot: opts.cacheRoot });
+  if (!catalog) return null;
+  const planModels = parseZcodeCatalogPlan(catalog.data, opts.plan.providerId).models;
+  const personal = readJsonFile(opts.personalConfigPath ?? defaultZcodePersonalConfigPath());
+  return resolveDefaultSelection(opts.plan, planModels, isRecord(personal) ? personal : {});
+}
+
 /** ─── Legacy provider-id migration (one-way, read boundary only) ─── */
 
 const LEGACY_PROVIDER_IDS: Record<string, string> = {
@@ -867,7 +900,37 @@ function resolveSelection(
     }
     return { ok: true, selection: { providerId: plan.providerId, modelId: entry.modelId, reasoningLevel: pick.reasoningLevel } };
   }
-  // Default: honour the GUI's own default when it validly targets this plan.
+  // Default: the shared precedence — the GUI's own defaultModelSelection when
+  // it validly targets this plan, else the plan default.
+  const def = resolveDefaultSelection(plan, planModels, personal);
+  if (!def) {
+    return {
+      ok: false,
+      code: "level-unavailable",
+      message:
+        `ZCode: no model with a usable reasoning level was found for your current plan (${plan.providerId}). Open ZCode, select a model on the plan, then retry.`,
+    };
+  }
+  return {
+    ok: true,
+    selection: { providerId: plan.providerId, modelId: def.modelId, reasoningLevel: def.reasoningLevel },
+  };
+}
+
+/**
+ * The default-selection precedence shared by {@link prepareZcodeModelBinding}
+ * and the detect layer's Default-chip label ({@link readZcodePlanDefaultChoice}):
+ * the GUI's own `defaultModelSelection` when it validly targets the plan
+ * (legacy provider ids migrated), else the plan's first enabled model with
+ * its last reasoning level (the CLI's `completeNewModelSelection` convention
+ * for new drafts). Returns null when even the plan default is unusable (no
+ * enabled model with a level).
+ */
+function resolveDefaultSelection(
+  plan: ZcodePlanSelection,
+  planModels: ZcodePlanModel[],
+  personal: { config?: Record<string, unknown> },
+): ZcodePlanDefaultChoice | null {
   const configured = isRecord(personal.config?.defaultModelSelection)
     ? personal.config.defaultModelSelection
     : null;
@@ -882,24 +945,12 @@ function resolveSelection(
       : null;
     const entry = modelId ? planModels.find((m) => m.modelId === modelId) : undefined;
     if (providerId === plan.providerId && entry && level && entry.levels.includes(level)) {
-      return { ok: true, selection: { providerId, modelId: entry.modelId, reasoningLevel: level } };
+      return { modelId: entry.modelId, reasoningLevel: level };
     }
   }
-  // Plan default: first enabled model + its last level (the CLI's
-  // completeNewModelSelection convention for new drafts).
   const first = planModels[0];
-  if (!first || first.levels.length === 0) {
-    return {
-      ok: false,
-      code: "level-unavailable",
-      message:
-        `ZCode: no model with a usable reasoning level was found for your current plan (${plan.providerId}). Open ZCode, select a model on the plan, then retry.`,
-    };
-  }
-  return {
-    ok: true,
-    selection: { providerId: plan.providerId, modelId: first.modelId, reasoningLevel: first.levels[first.levels.length - 1]! },
-  };
+  if (!first || first.levels.length === 0) return null;
+  return { modelId: first.modelId, reasoningLevel: first.levels[first.levels.length - 1]! };
 }
 
 /** True when the environment already carries BOTH provider-config vars — the

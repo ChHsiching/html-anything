@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useStore } from "./store";
+import { resolveAgentModel } from "./agent-models";
 
 type DraftReq = {
   instruction: string;
@@ -41,11 +42,10 @@ export function useDraft() {
       return;
     }
     const taskId = store.activeTaskId;
-    const agentModels = store.agentModels;
-    const model =
-      agentModels[agent] && agentModels[agent] !== "default"
-        ? agentModels[agent]
-        : undefined;
+    // #38: a stale persisted pick falls back to Default instead of being sent.
+    const agentInfo = store.agents.find((a) => a.id === agent);
+    const resolvedModel = resolveAgentModel(agentInfo?.models, store.agentModels[agent]);
+    const model = resolvedModel !== "default" ? resolvedModel : undefined;
     const binOverride = store.agentBinOverrides[agent]?.trim() || undefined;
 
     const ctl = new AbortController();

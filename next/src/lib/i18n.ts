@@ -71,6 +71,7 @@ export interface Dict {
   "model.defaultHint.suffix": string;
   "model.defaultHint.zcode": string;
   "model.defaultLabel": string;
+  "model.staleNotice": string;
 
   // Agent card
   "agent.selected": string;
@@ -436,6 +437,7 @@ const en: Dict = {
   "model.defaultHint.suffix": " and lets the CLI pick.",
   "model.defaultHint.zcode": "Default follows the current plan in the ZCode GUI.",
   "model.defaultLabel": "Default (CLI config)",
+  "model.staleNotice": "The saved model choice is no longer offered by this agent; reverted to Default.",
 
   "agent.selected": "Selected",
   "agent.notInstalled": "Not installed",
@@ -805,6 +807,7 @@ const zhCN: Dict = {
   "model.defaultHint.suffix": ", 由 CLI 自己挑",
   "model.defaultHint.zcode": "选 Default 时跟随 ZCode GUI 当前计划。",
   "model.defaultLabel": "Default (CLI config)",
+  "model.staleNotice": "已保存的模型选择已不在该 agent 的列表中，已回退为 Default。",
 
   "agent.selected": "SELECTED",
   "agent.notInstalled": "未安装",
