@@ -200,77 +200,12 @@ export type AgentParse =
  */
 export type ParseState = {
   sawStreamEventText?: boolean;
-  /** #41 leak fix: server-tool card filter state (zcode only). */
-  zcodeToolCardBuf?: string;
-  zcodeToolCardSwallowing?: boolean;
   opencodeAccumulatedInputTokens?: number;
   opencodeAccumulatedOutputTokens?: number;
   opencodeAccumulatedCacheReadTokens?: number;
   opencodeAccumulatedCacheWriteTokens?: number;
   opencodeAccumulatedCost?: number;
 };
-
-/**
- * Streaming filter for Z.ai server-tool display cards (#41 leak fix).
- *
- * ZCode's server-executed builtin tools (webReader / webSearch …) stream
- * their display cards ("\uD83C\uDF10 Z.ai Built-in Tool: webReader …
- * Input … Executing on server … Output …") as ASSISTANT TEXT — the tool
- * names appear nowhere in the CLI bundle, so these frames can only be told
- * apart from the deliverable by their fixed marker. The tools themselves
- * stay enabled (the model may fetch links from the user content); only the
- * card text must not reach the final HTML.
- *
- * State machine over the delta stream: normal mode holds back a suffix that
- * could be a partial marker; the marker starts swallow mode; swallow ends
- * where the deliverable resumes — the next HTML tag ("<"+letter/!) or the
- * next card marker. Held-back tails flush on the next delta; whatever is
- * still held when the turn ends is dropped (the stream ends with </html>).
- */
-const ZCODE_SERVER_TOOL_CARD_MARK = "**\uD83C\uDF10 Z.ai Built-in Tool:";
-
-function zcodeFilterServerToolCards(
-  state: { zcodeToolCardBuf?: string; zcodeToolCardSwallowing?: boolean },
-  delta: string,
-): string {
-  let rest = (state.zcodeToolCardBuf ?? "") + delta;
-  let out = "";
-  for (;;) {
-    if (state.zcodeToolCardSwallowing) {
-      const html = rest.search(/<(?=[a-zA-Z!])/);
-      const nextCard = rest.indexOf(ZCODE_SERVER_TOOL_CARD_MARK);
-      let cut = -1;
-      if (html !== -1 && (nextCard === -1 || html < nextCard)) cut = html;
-      else if (nextCard !== -1) cut = nextCard;
-      if (cut === -1) {
-        // Keep the last char — a "<" may be split from its follower across deltas.
-        state.zcodeToolCardBuf = rest.length > 1 ? rest.slice(-1) : rest;
-        return out;
-      }
-      state.zcodeToolCardSwallowing = false;
-      rest = rest.slice(cut);
-      continue;
-    }
-    const mark = rest.indexOf(ZCODE_SERVER_TOOL_CARD_MARK);
-    if (mark !== -1) {
-      out += rest.slice(0, mark);
-      state.zcodeToolCardBuf = "";
-      state.zcodeToolCardSwallowing = true;
-      return out;
-    }
-    let hold = 0;
-    const maxHold = Math.min(rest.length, ZCODE_SERVER_TOOL_CARD_MARK.length - 1);
-    for (let n = maxHold; n > 0; n--) {
-      if (ZCODE_SERVER_TOOL_CARD_MARK.startsWith(rest.slice(-n))) {
-        hold = n;
-        break;
-      }
-    }
-    out += rest.slice(0, rest.length - hold);
-    state.zcodeToolCardBuf = rest.slice(rest.length - hold);
-    return out;
-  }
-}
 
 /**
  * Build a stateful per-invocation parser. Feed every stdout line through the
@@ -374,8 +309,7 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
         typeof payload.delta === "string" &&
         payload.delta.length > 0
       ) {
-        const text = zcodeFilterServerToolCards(state, payload.delta);
-        return text.length > 0 ? [{ kind: "delta", text }] : [];
+        return [{ kind: "delta", text: payload.delta }];
       }
     }
     return [];
