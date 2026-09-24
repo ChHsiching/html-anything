@@ -180,11 +180,21 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
   });
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.useRealTimers();
     existsSyncDelegate.mockImplementation((p: string) => p === "/bin/sh");
   });
 
   const attachDir = () => mockMkdtempSync.mock.results[0]?.value as string;
   const attachFile = () => path.join(attachDir(), "prompt.md");
+  // Fake-timer tests drive start() to completion through microtasks only
+  // (process.nextTick is NOT faked) — the same helper the mount describe
+  // uses for its 5s-timeout test.
+  const flushMicrotasks = async (iterations = 200) => {
+    for (let i = 0; i < iterations; i++) {
+      await Promise.resolve();
+      await new Promise((r) => process.nextTick(r));
+    }
+  };
 
   it("spawns `node <cjs> -p <guide> --attach <tmp> --output-format stream-json --mode yolo` and reports start.argv", async () => {
     const { child, stdout } = makeFakeChild();
@@ -491,9 +501,14 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     child.emit("close", 1);
 
     const events = await eventsPromise;
-    expect(events.filter((e) => e.type === "error")).toEqual([
-      { type: "error", message: "Select a model before continuing" },
-    ]);
+    const errors = events.filter((e) => e.type === "error");
+    // The stream's own turn.failed error comes first; #37 then maps the
+    // non-zero exit to a second error right before done.
+    expect(errors[0]).toEqual({ type: "error", message: "Select a model before continuing" });
+    expect(errors[1]).toMatchObject({
+      type: "error",
+      message: expect.stringMatching(/exited with code 1/),
+    });
   });
 
   it("writes the full prompt to the attach temp file — not on argv, not on stdin", async () => {
@@ -575,7 +590,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
   });
 
   it("removes the attach temp dir when the consumer cancels the stream", async () => {
-    const { child } = makeFakeChild();
+    const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
     const stream = invokeAgent({
@@ -589,6 +604,234 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
+  });
+
+  // ─── #37 failure & teardown hardening ───────────────────────────────
+
+  it("(#37) errors and tears the turn down after 180s of zero parsed events", async () => {
+    vi.useFakeTimers();
+    const { child, stdout } = makeFakeChild();
+    const killSpy = vi.fn();
+    (child as unknown as { kill: unknown }).kill = killSpy;
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await flushMicrotasks();
+    // A NOISE line (session.* — parses to zero events) arrives mid-window.
+    // It must NOT reset the clock: the watchdog counts PARSED events only.
+    vi.advanceTimersByTime(90_000);
+    stdout.write(`${zcodeLines()[0]}\n`);
+    await flushMicrotasks();
+    vi.advanceTimersByTime(90_000); // 180s since the spawn, 90s since the noise
+    await flushMicrotasks();
+
+    const events = await collectStream(stream);
+    const errors = events.filter((e) => e.type === "error");
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { message?: string }).message).toMatch(/no stream events for 180s/);
+    // Child killed, attach temp dir removed, stream closed — and NO done
+    // event: the turn failed, it did not complete.
+    expect(killSpy).toHaveBeenCalled();
+    expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
+    expect(events.some((e) => e.type === "done")).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("(#37) resets the silence clock on every parsed event", async () => {
+    vi.useFakeTimers();
+    const { child, stdout } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await flushMicrotasks();
+    // t+100s: a PARSED text_delta arrives → the clock restarts from here.
+    vi.advanceTimersByTime(100_000);
+    stdout.write(
+      `{"payload":{"delta":"BE","done":false,"kind":"text_delta"},"seq":1,"type":"model.streaming"}\n`,
+    );
+    await flushMicrotasks();
+    // t+200s (100s since the delta): without the reset the spawn-time timer
+    // would have fired at t=180s. The clock restarted → still armed.
+    vi.advanceTimersByTime(100_000);
+    await flushMicrotasks();
+    expect(vi.getTimerCount()).toBe(1);
+
+    // 180s of silence counted from the delta → fires.
+    vi.advanceTimersByTime(80_500);
+    await flushMicrotasks();
+
+    const events = await collectStream(stream);
+    const errors = events.filter((e) => e.type === "error");
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { message?: string }).message).toMatch(/no stream events for 180s/);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("(#37) does not arm the watchdog for non-zcode agents", async () => {
+    vi.useFakeTimers();
+    const { child, stdout } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "claude",
+      prompt: "p",
+      binOverride: "/bin/sh",
+    });
+
+    await flushMicrotasks();
+    // Never armed for a sibling agent…
+    expect(vi.getTimerCount()).toBe(0);
+
+    // …so a full silence window + close produces no watchdog error and the
+    // close path still reaches done (historical behavior intact).
+    vi.advanceTimersByTime(180_500);
+    await flushMicrotasks();
+    stdout.end();
+    await flushMicrotasks();
+    child.emit("close", 0);
+
+    const events = await collectStream(stream);
+    expect(events.filter((e) => e.type === "error")).toEqual([]);
+    expect(events.some((e) => e.type === "done")).toBe(true);
+  });
+
+  it("(#37) never arms the watchdog before the spawn (binding-refusal window)", async () => {
+    vi.useFakeTimers();
+    mockPrepareBinding.mockReturnValue({ ok: false, message: "no model plan found" });
+    const { child } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await flushMicrotasks();
+
+    const events = await collectStream(stream);
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    expect(mockSpawn).not.toHaveBeenCalled(); // refused before the spawn
+    // No orphaned timer survives the refusal.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("(#37) maps a non-zero exit to an error BEFORE done, carrying the stderr essence", async () => {
+    const { child, stdout, stderr } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    stderr.write("node:internal/modules/cjs/loader:1145\nError: Cannot find module 'zcode.cjs'\n");
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 3);
+
+    const events = await eventsPromise;
+    const idxErr = events.findIndex((e) => e.type === "error");
+    const idxDone = events.findIndex((e) => e.type === "done");
+    expect(idxErr).toBeGreaterThan(-1);
+    expect(idxDone).toBeGreaterThan(idxErr);
+    const message = (events[idxErr] as { message: string }).message;
+    expect(message).toMatch(/exited with code 3/);
+    expect(message).toContain("Cannot find module 'zcode.cjs'");
+    expect((events[idxDone] as { code: number }).code).toBe(3);
+  });
+
+  it("(#37) caps the stderr essence carried by the exit error", async () => {
+    const { child, stdout, stderr } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+
+    stderr.write(`HEAD_MARKER${"x".repeat(3_000)}TAIL_MARKER`);
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 1);
+
+    const events = await eventsPromise;
+    const errors = events.filter((e) => e.type === "error");
+    const message = (errors[0] as { message?: string }).message ?? "";
+    expect(message).toContain("TAIL_MARKER");
+    expect(message).not.toContain("HEAD_MARKER");
+  });
+
+  it("(#37) keeps the exit-0 close shape — no exit error", async () => {
+    const { child, stdout } = makeFakeChild();
+    mockSpawn.mockReturnValue(child);
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const eventsPromise = collectStream(stream);
+    stdout.write(`${zcodeLines().join("\n")}\n`);
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+    child.emit("close", 0);
+
+    const events = await eventsPromise;
+    expect(events.filter((e) => e.type === "error")).toEqual([]);
+    expect(events.some((e) => e.type === "done")).toBe(true);
+  });
+
+  it("(#37) clears the watchdog on abort — nothing fires after the cancel", async () => {
+    vi.useFakeTimers();
+    const { child } = makeFakeChild();
+    const killSpy = vi.fn();
+    (child as unknown as { kill: unknown }).kill = killSpy;
+    mockSpawn.mockReturnValue(child);
+    const controller = new AbortController();
+
+    const stream = invokeAgent({
+      agent: "zcode",
+      prompt: "p",
+      binOverride: "/resolved/node.exe",
+      signal: controller.signal,
+    });
+
+    await flushMicrotasks();
+    controller.abort();
+    await flushMicrotasks();
+    // Advancing past the whole silence window must not fire anything: the
+    // abort path already killed the child, cleaned the temp dir, and closed
+    // the stream.
+    vi.advanceTimersByTime(180_500);
+    await flushMicrotasks();
+
+    const events = await collectStream(stream);
+    expect(events.filter((e) => e.type === "error")).toEqual([]);
+    expect(events.some((e) => e.type === "done")).toBe(false);
+    expect(killSpy).toHaveBeenCalled();
+    expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

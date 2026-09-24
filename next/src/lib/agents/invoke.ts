@@ -101,6 +101,26 @@ export type InvokeEvent =
   | { type: "done"; code: number | null }
   | { type: "error"; message: string };
 
+/**
+ * #37 silence watchdog (zcode only): a healthy stream-json turn produces
+ * parsed events continuously (deltas, thinking fragments, tool status), so
+ * 180s with ZERO parsed events means the model or CLI hung and the turn
+ * would hang forever with no teardown. Any stdout line that parses to at
+ * least one event resets the clock; when it fires the turn errors out, the
+ * child is killed, and the stream closes. Sibling agents keep their
+ * historical behavior.
+ */
+const ZCODE_SILENCE_TIMEOUT_MS = 180_000;
+
+/**
+ * Cap on the stderr tail kept for the non-zero-exit error message (#37).
+ * The FULL stderr keeps streaming to the log as `stderr` events; this buffer
+ * only feeds the one-line exit error with its most recent essence.
+ */
+const STDERR_TAIL_CAP = 2_000;
+/** How much of that tail the exit-error message actually quotes. */
+const STDERR_HINT_MAX = 500;
+
 export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   const def = AGENTS.find((a) => a.id === opts.agent);
   if (!def) {
@@ -175,6 +195,16 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   //   - attachTmpDir: the mkdtemp dir holding zcode's prompt.md attachment.
   let mountChild: ChildProcessWithoutNullStreams | null = null;
   let attachTmpDir: string | null = null;
+  // #37: the zcode silence-watchdog handle, lifted for the same reason as
+  // cleanupArgvAttach — `cancel`, a sibling of `start`, must be able to clear
+  // it without waiting for `start` to run.
+  let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearSilenceTimer = () => {
+    if (silenceTimer !== null) {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  };
   const cleanupArgvAttach = () => {
     // ADR-0007: the mount child holds the FUSE mount alive; kill it so the
     // mount unmounts at teardown (per-turn mount+unmount). No-op off-Linux.
@@ -414,6 +444,32 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         safeEnqueue({ type: "meta", key: "model", value: boundModelMeta });
       }
 
+      // #37: arm the silence watchdog only HERE — after the spawn succeeded —
+      // so the argv-assembly / Linux-mount / binding window before it can
+      // never trip the timer (that window has its own bounded failures).
+      const fireSilence = () => {
+        silenceTimer = null;
+        safeEnqueue({
+          type: "error",
+          message: `ZCode produced no stream events for ${ZCODE_SILENCE_TIMEOUT_MS / 1000}s — the turn was terminated (hung model or CLI?).`,
+        });
+        try {
+          child?.kill("SIGTERM");
+        } catch {}
+        cleanupArgvAttach();
+        safeClose();
+      };
+      const resetSilenceTimer = () => {
+        // No-op once the turn ended (close/abort cleared the handle) or for
+        // agents that never armed one.
+        if (silenceTimer === null) return;
+        clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(fireSilence, ZCODE_SILENCE_TIMEOUT_MS);
+      };
+      if (opts.agent === "zcode") {
+        silenceTimer = setTimeout(fireSilence, ZCODE_SILENCE_TIMEOUT_MS);
+      }
+
       child.stdin.on("error", () => {});
       try {
         // stdin-protocol agents read the prompt from stdin; argv / argv-message
@@ -428,6 +484,8 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       const parse = makeParser(opts.agent);
 
       let stdoutBuf = "";
+      // #37: rolling stderr tail feeding the non-zero-exit error message.
+      let stderrTail = "";
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         if (closed) return;
@@ -440,7 +498,13 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           const line = stdoutBuf.slice(0, nl);
           stdoutBuf = stdoutBuf.slice(nl + 1);
           if (!line) continue;
-          for (const part of parse(line)) {
+          const parts = parse(line);
+          // #37: any line that parsed to at least one event proves the turn
+          // is alive — reset the zcode silence watchdog (no-op for the
+          // agents that never armed one). Dropped noise lines do NOT reset:
+          // they are exactly the "silence" the watchdog exists to catch.
+          if (parts.length > 0) resetSilenceTimer();
+          for (const part of parts) {
             // Some agents (bob) may echo the entire prompt back as the first
             // streamed delta. Suppress that to avoid polluting the user-facing
             // output with the system prompt.
@@ -458,16 +522,19 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
 
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
+        stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CAP);
         safeEnqueue({ type: "stderr", text: chunk });
       });
 
       child.on("error", (err) => {
+        clearSilenceTimer();
         safeEnqueue({ type: "error", message: err.message });
         cleanupArgvAttach();
         safeClose();
       });
 
       child.on("close", (code) => {
+        clearSilenceTimer();
         if (opts.agent === "openclaw") {
           // OpenClaw's `agent --local --json` emits one pretty-printed JSON
           // document on stdout. The visible reply is at
@@ -534,11 +601,24 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         // argv-attach teardown: kill the Linux mount holder and remove the
         // prompt temp dir (no-op for every other agent).
         cleanupArgvAttach();
+        // #37: a non-zero exit is a failed turn — emit the error BEFORE done
+        // so the consumer's failure gate renders the red error state (an
+        // exit-0/unknown-code close keeps the historical done-only shape).
+        // Carries the stderr essence for diagnosability; the full stderr has
+        // already streamed as `stderr` log events.
+        if (opts.agent === "zcode" && code != null && code !== 0) {
+          const hint = stderrTail.trim();
+          safeEnqueue({
+            type: "error",
+            message: `ZCode exited with code ${code}.${hint ? ` stderr: ${hint.slice(-STDERR_HINT_MAX)}` : ""}`,
+          });
+        }
         safeEnqueue({ type: "done", code });
         safeClose();
       });
 
       const onAbort = () => {
+        clearSilenceTimer();
         try {
           child?.kill("SIGTERM");
         } catch {}
@@ -549,8 +629,9 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     },
     cancel() {
       // Stream consumer cancelled. Release the argv-attach turn's resources
-      // (mount holder + prompt temp file); the child itself is governed by
-      // the abort signal — unchanged generic behavior.
+      // (mount holder + prompt temp file + silence watchdog); the child
+      // itself is governed by the abort signal — unchanged generic behavior.
+      clearSilenceTimer();
       cleanupArgvAttach();
     },
   });
