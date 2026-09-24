@@ -442,8 +442,8 @@ function ModelPicker({
         </div>
         <div className="text-[10.5px] text-[var(--ink-mute)] max-w-[220px] text-right leading-snug">
           {agent.protocol === "argv-attach" ? (
-            // #41: ZCode has no --model flag — the hint must describe the
-            // temp-clone binding truthfully, not the sibling CLIs' flag.
+            // #41: ZCode has no --model flag — the hint must be truthful
+            // about what Default does, not describe the sibling CLIs' flag.
             t("model.defaultHint.zcode")
           ) : (
             <>

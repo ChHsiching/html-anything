@@ -376,15 +376,15 @@ describe("parseZcodeCatalogPlan", () => {
 describe("picker id codec", () => {
   it("round-trips a (modelId, level) pair", () => {
     const id = encodeZcodeModelChoice("GLM-5.2", "high");
-    expect(id).toBe("GLM-5.2@high");
+    expect(id).toBe("GLM-5.2/high");
     expect(decodeZcodeModelChoice(id)).toEqual({ modelId: "GLM-5.2", reasoningLevel: "high" });
   });
 
   it("rejects ids without a level suffix (plain model ids are NOT valid picks)", () => {
     expect(decodeZcodeModelChoice("GLM-5.2")).toBeNull();
     expect(decodeZcodeModelChoice("default")).toBeNull();
-    expect(decodeZcodeModelChoice("@high")).toBeNull();
-    expect(decodeZcodeModelChoice("GLM-5.2@")).toBeNull();
+    expect(decodeZcodeModelChoice("/high")).toBeNull();
+    expect(decodeZcodeModelChoice("GLM-5.2/")).toBeNull();
   });
 });
 
@@ -405,11 +405,11 @@ describe("readZcodePlanModelOptions (detect-surface composition)", () => {
       expect(plan).not.toBeNull();
       const options = readZcodePlanModelOptions({ cjsPath: cjs, plan: plan! });
       expect(options).toEqual([
-        { id: "GLM-5.2@disabled", label: "GLM-5.2 · disabled", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.2@high", label: "GLM-5.2 · high", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.2@max", label: "GLM-5.2 · max", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.3@disabled", label: "GLM-5.3 · disabled", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.3@enabled", label: "GLM-5.3 · enabled", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.2/disabled", label: "GLM-5.2 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.2/high", label: "GLM-5.2 (high)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.2/max", label: "GLM-5.2 (max)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
       ]);
       // Unreadable catalog → empty chips (caller keeps the DEFAULT floor).
       rmSync(join(install, "resources", "config", "provider", "zcode-builtin.json"), { force: true });
@@ -473,7 +473,7 @@ describe("prepareZcodeModelBinding", () => {
     const before = readFileSync(f.personalPath, "utf8");
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
-      model: "GLM-5.2@high",
+      model: "GLM-5.2/high",
       attachDir: f.attachDir,
       settingPath: f.settingPath,
       personalConfigPath: f.personalPath,
@@ -582,10 +582,10 @@ describe("prepareZcodeModelBinding", () => {
       JSON.stringify(catalogFixture()),
     );
     // 3. Model not in plan.
-    const notInPlan = prepareZcodeModelBinding({ ...base, settingPath: f.settingPath, model: "GLM-9@high" });
+    const notInPlan = prepareZcodeModelBinding({ ...base, settingPath: f.settingPath, model: "GLM-9/high" });
     expect(notInPlan).toMatchObject({ ok: false, code: "model-not-in-plan" });
     // 4. Level required but unavailable.
-    const badLevel = prepareZcodeModelBinding({ ...base, settingPath: f.settingPath, model: "GLM-5.2@medium" });
+    const badLevel = prepareZcodeModelBinding({ ...base, settingPath: f.settingPath, model: "GLM-5.2/medium" });
     expect(badLevel).toMatchObject({ ok: false, code: "level-unavailable" });
     // 5. Personal config unreadable.
     const noPersonal = prepareZcodeModelBinding({
@@ -621,7 +621,7 @@ describe("prepareZcodeModelBinding", () => {
     expect(result).toMatchObject({ ok: false, code: "level-unavailable" });
   });
 
-  it("a BARE model id (pre-#41 persisted pick, no @level) REFUSES — never silently binds the default", () => {
+  it("a BARE model id (pre-#41 persisted pick, no level suffix) REFUSES — never silently binds the default", () => {
     const f = fixtureTree();
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,

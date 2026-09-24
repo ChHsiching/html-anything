@@ -434,8 +434,7 @@ const en: Dict = {
   "model.label": "Pick a model for {agent}",
   "model.defaultHint.prefix": "Default omits ",
   "model.defaultHint.suffix": " and lets the CLI pick.",
-  "model.defaultHint.zcode":
-    "Every generation is pinned to the picked model × thinking level via ZCode's own config (temp copy); Default follows the current plan in the ZCode GUI.",
+  "model.defaultHint.zcode": "Default follows the current plan in the ZCode GUI.",
   "model.defaultLabel": "Default (CLI config)",
 
   "agent.selected": "Selected",
@@ -804,8 +803,7 @@ const zhCN: Dict = {
   "model.label": "为 {agent} 选个模型",
   "model.defaultHint.prefix": "选 Default 时不传 ",
   "model.defaultHint.suffix": ", 由 CLI 自己挑",
-  "model.defaultHint.zcode":
-    "每次生成都通过 ZCode 自己的配置（临时副本）绑定所选模型 × 思考档位；Default 跟随 ZCode GUI 当前计划。",
+  "model.defaultHint.zcode": "选 Default 时跟随 ZCode GUI 当前计划。",
   "model.defaultLabel": "Default (CLI config)",
 
   "agent.selected": "SELECTED",

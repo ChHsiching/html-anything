@@ -338,7 +338,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
             return;
           }
           Object.assign(env, zcodeBindingEnv(binding));
-          boundModelMeta = `${binding.selection.modelId}@${binding.selection.reasoningLevel}`;
+          boundModelMeta = `${binding.selection.modelId}/${binding.selection.reasoningLevel}`;
         }
       }
 

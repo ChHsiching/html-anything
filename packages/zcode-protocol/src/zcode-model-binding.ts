@@ -541,17 +541,19 @@ function extractLevelValues(config: unknown): string[] | null {
 
 /**
  * Encode a (modelId, reasoningLevel) picker choice into the single string the
- * UI store persists and the invoke layer receives as `model`. Model ids in the
- * catalog are `[-A-Za-z0-9.]`-shaped and contain no `@`; a hostile id simply
- * fails decode/validation at invoke time.
+ * UI store persists and the invoke layer receives as `model` —
+ * `"<modelId>/<level>"`, the same slash-separated compound-id convention the
+ * openclaw (`openrouter/anthropic/…`) and opencode (`anthropic/…`) pickers
+ * use. Model ids in the catalog are `[-A-Za-z0-9.]`-shaped and contain no
+ * `/`; a hostile id simply fails decode/validation at invoke time.
  */
 export function encodeZcodeModelChoice(modelId: string, reasoningLevel: string): string {
-  return `${modelId}@${reasoningLevel}`;
+  return `${modelId}/${reasoningLevel}`;
 }
 
 /** Inverse of {@link encodeZcodeModelChoice}; null for ids without a level suffix. */
 export function decodeZcodeModelChoice(id: string): { modelId: string; reasoningLevel: string } | null {
-  const at = id.lastIndexOf("@");
+  const at = id.lastIndexOf("/");
   if (at <= 0 || at === id.length - 1) return null;
   return { modelId: id.slice(0, at), reasoningLevel: id.slice(at + 1) };
 }
@@ -566,7 +568,7 @@ export interface ZcodePlanModelOption {
 /**
  * Resolve the catalog for a resolved cjs + plan and expand the plan's models
  * into picker chips: one per model×level, ids encoded as
- * `"<modelId>@<level>"`, labels `"<modelId> · <level>"`, every chip carrying
+ * `"<modelId>/<level>"`, labels `"<modelId> (<level>)"`, every chip carrying
  * the plan providerId. Returns an empty list when the catalog is unreadable —
  * the caller keeps the static [DEFAULT_MODEL] floor and lets the invoke-time
  * refusal surface the actionable error. Shared by the next + cli detect
@@ -583,7 +585,7 @@ export function readZcodePlanModelOptions(opts: {
   return plan.models.flatMap((m) =>
     m.levels.map((level) => ({
       id: encodeZcodeModelChoice(m.modelId, level),
-      label: `${m.modelId} · ${level}`,
+      label: `${m.modelId} (${level})`,
       providerId: plan.providerId,
     })),
   );
@@ -645,7 +647,7 @@ export type ZcodeBindingResult =
  * own `defaultModelSelection` when it targets the plan provider validly, else
  * the plan's first enabled model with its last level (the CLI's
  * `completeNewModelSelection` convention, `values.at(-1)`). Any OTHER string
- * is an explicit pick: it must decode to `"<modelId>@<level>"` AND validate
+ * is an explicit pick: it must decode to `"<modelId>/<level>"` AND validate
  * inside the plan, else the matching refusal fires — a bare/stale model id
  * (e.g. persisted by a pre-#41 UI) never silently reroutes. Either way the
  * turn is deterministically bound — there is no path that leaves the CLI to
@@ -653,7 +655,7 @@ export type ZcodeBindingResult =
  */
 export function prepareZcodeModelBinding(opts: {
   cjsPath: string;
-  /** Picker id: undefined | "default" | "<modelId>@<level>". */
+  /** Picker id: undefined | "default" | "<modelId>/<level>". */
   model?: string;
   /** Directory for the clone (the invoke layer's attach temp dir — its
    * existing cleanup removes the clone with the prompt file). */
@@ -736,7 +738,7 @@ function resolveSelection(
   personal: { config?: Record<string, unknown> },
 ): { ok: true; selection: ZcodeModelSelection } | { ok: false; code: ZcodeBindingRefusal; message: string } {
   if (model !== undefined && model !== "default") {
-    // An EXPLICIT pick must decode to "<modelId>@<level>" and validate inside
+    // An EXPLICIT pick must decode to "<modelId>/<level>" and validate inside
     // the plan — anything else (a bare model id persisted by a pre-#41 UI, a
     // stale chip id after a plan change) REFUSES rather than silently binding
     // the plan default. The silent-reroute class is exactly what #41 exists
@@ -746,7 +748,7 @@ function resolveSelection(
       return {
         ok: false,
         code: "model-not-in-plan",
-        message: `ZCode: the saved model choice "${model}" is stale or malformed (expected "<model>@<level>"). Re-scan agents in Settings and pick a model again, then retry.`,
+        message: `ZCode: the saved model choice "${model}" is stale or malformed (expected "<model>/<level>"). Re-scan agents in Settings and pick a model again, then retry.`,
       };
     }
     const entry = planModels.find((m) => m.modelId === pick.modelId);

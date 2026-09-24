@@ -847,7 +847,7 @@ export function detectAgents(): DetectedAgent[] {
     // levels, read from setting.json + the install-bundled catalog (the same
     // sources the invoke layer binds against — see
     // zcode-model-binding.ts). Chips carry ids of the form
-    // "<modelId>@<level>" plus the plan providerId; the "default" entry binds
+    // "<modelId>/<level>" plus the plan providerId; the "default" entry binds
     // the plan's own default at invoke time. Reads are gated on availability
     // (an unavailable install keeps the static [DEFAULT_MODEL] floor, and a
     // not-ready install — GUI never opened / not logged in — surfaces the

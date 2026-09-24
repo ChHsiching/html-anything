@@ -22,11 +22,11 @@ const { existsSyncMock, readFileSyncMock, bindingReadyState, bindingChips } = vi
     } as null | { family: string; kind: string; providerId: string },
   },
   bindingChips: [
-    { id: "GLM-5.2@disabled", label: "GLM-5.2 · disabled", providerId: "account:bigmodel-individual-coding-plan" },
-    { id: "GLM-5.2@high", label: "GLM-5.2 · high", providerId: "account:bigmodel-individual-coding-plan" },
-    { id: "GLM-5.2@max", label: "GLM-5.2 · max", providerId: "account:bigmodel-individual-coding-plan" },
-    { id: "GLM-5.3@disabled", label: "GLM-5.3 · disabled", providerId: "account:bigmodel-individual-coding-plan" },
-    { id: "GLM-5.3@enabled", label: "GLM-5.3 · enabled", providerId: "account:bigmodel-individual-coding-plan" },
+    { id: "GLM-5.2/disabled", label: "GLM-5.2 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
+    { id: "GLM-5.2/high", label: "GLM-5.2 (high)", providerId: "account:bigmodel-individual-coding-plan" },
+    { id: "GLM-5.2/max", label: "GLM-5.2 (max)", providerId: "account:bigmodel-individual-coding-plan" },
+    { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
+    { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
   ],
 }));
 
@@ -790,11 +790,11 @@ describe("detectAgents", () => {
       expect(zcode.notReadyReason).toBeUndefined();
       expect(zcode.models).toEqual([
         { id: "default", label: "Default (ZCode GUI plan)" },
-        { id: "GLM-5.2@disabled", label: "GLM-5.2 · disabled", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.2@high", label: "GLM-5.2 · high", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.2@max", label: "GLM-5.2 · max", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.3@disabled", label: "GLM-5.3 · disabled", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.3@enabled", label: "GLM-5.3 · enabled", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.2/disabled", label: "GLM-5.2 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.2/high", label: "GLM-5.2 (high)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.2/max", label: "GLM-5.2 (max)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
+        { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
       ]);
     });
 

@@ -279,7 +279,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     const stream = invokeAgent({
       agent: "zcode",
       prompt: "build it",
-      model: "GLM-5.2@high",
+      model: "GLM-5.2/high",
       binOverride: "/resolved/node.exe",
     });
 
@@ -292,7 +292,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
 
     // The binding got the picker id and the attach temp dir (clone lives there).
     expect(mockPrepareBinding).toHaveBeenCalledWith(
-      expect.objectContaining({ cjsPath: "/resolved/zcode.cjs", model: "GLM-5.2@high", attachDir: attachDir() }),
+      expect.objectContaining({ cjsPath: "/resolved/zcode.cjs", model: "GLM-5.2/high", attachDir: attachDir() }),
     );
     const [, , spawnOpts] = mockSpawn.mock.calls[0] as unknown as [
       string,
@@ -308,7 +308,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(spawnOpts.env.ELECTRON_RUN_AS_NODE).toBe("1");
     // Bound model meta right after start (ZCode's own stream has no model meta).
     const meta = events.find((e) => e.type === "meta" && e.key === "model");
-    expect(meta).toMatchObject({ type: "meta", key: "model", value: "GLM-5.2@high" });
+    expect(meta).toMatchObject({ type: "meta", key: "model", value: "GLM-5.2/high" });
   });
 
   // #41 — fail-refuse: a broken link in the resolution chain refuses the spawn
