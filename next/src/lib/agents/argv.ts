@@ -27,7 +27,7 @@ export class UnsupportedAgentProtocolError extends Error {
  * reach for file-write tools). Keep it short: `-p` takes an argv value.
  */
 const ZCODE_PROMPT_GUIDE =
-  "附件是完整的任务说明。请严格按其中的要求执行，并将最终结果（完整 HTML）直接作为你的回复正文输出。";
+  "附件是完整的任务说明。请严格按其中的要求执行，禁止调用任何工具（包括网页抓取/搜索等内置工具），也不要把任何工具调用或执行过程写进回复，直接将最终结果（完整 HTML）作为你的回复正文输出。";
 
 export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
   const { model } = _opts;
