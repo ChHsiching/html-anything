@@ -187,6 +187,13 @@ export type AgentParse =
    * real HTML. Downstream calls `setHtmlFor`, not `appendHtmlFor`.
    */
   | { kind: "html"; text: string }
+  /**
+   * Turn-level failure surfaced by the stream itself (e.g. ZCode's
+   * `turn.failed` event). Carries the human-readable message only; the invoke
+   * layer forwards it as `{type:"error"}` so the consumer-side failure gate
+   * (red error state) can fire on it.
+   */
+  | { kind: "error"; message: string }
   | { kind: "noise" };
 
 /**
@@ -205,6 +212,14 @@ export type ParseState = {
   opencodeAccumulatedCacheReadTokens?: number;
   opencodeAccumulatedCacheWriteTokens?: number;
   opencodeAccumulatedCost?: number;
+  /**
+   * ZCode: toolCallId → toolName, filled when the `model.streaming`
+   * tool_call event names the tool. `tool.updated` result events carry only a
+   * toolCallId, so the "工具 X 完成" status line resolves the name through
+   * this map — a result whose id maps to nothing emits no line at all
+   * (a nameless status line is noise).
+   */
+  zcodeToolNamesById?: Map<string, string>;
 };
 
 /**
@@ -274,6 +289,136 @@ function rescueHtmlFromToolUse(
   return parts.join("");
 }
 
+/**
+ * ZCode CLI one-shot (`-p --output-format stream-json`) stdout, one NDJSON
+ * event envelope per line:
+ *
+ *   {"eventId":…,"payload":{…},"seq":…,"sessionId":…,"timestamp":…,"type":"model.streaming"}
+ *
+ * Event surface (types observed live + pinned in the ZCode open-source
+ * contracts, apps/zcode-cli/packages/contracts/src/events/session.events.ts):
+ *
+ *  - `model.streaming` — the model's own stream, dispatched on `payload.kind`:
+ *      text_delta → streamed text (delta channel)
+ *      reasoning_delta → thinking meta, forwarded fragment by fragment under
+ *        the same `thinking` key the Claude path emits
+ *      tool_call → the fully-assembled tool invocation ({toolCallId,
+ *        toolName, input}). A file-write tool's input may hold the generated
+ *        HTML — run the shared rescue; otherwise surface a natural-language
+ *        status line so the stream keeps flowing during the tool window.
+ *        Records toolCallId→toolName for the result event, which is nameless.
+ *      (start/text_start/text_end/reasoning_start/reasoning_end/
+ *       tool_input_start/tool_input_delta/tool_input_end/finish → no output)
+ *  - `tool.updated` — tool execution lifecycle, dispatched on an injected
+ *      `payload.kind` (scheduled/started/progress/result/error/batch). Only
+ *      `result` matters here: emit "工具 X 完成" with the name resolved via
+ *      the tool_call map. A nameless result emits nothing — a bare ✓ with no
+ *      context is worse than no line at all.
+ *  - `turn.completed` — end of turn: usage (remapped to the snake_case keys
+ *      the consumer reads), duration, and resultType ("success",
+ *      "cancelled", …). This is the ONLY place usage is emitted.
+ *  - `turn.failed` — turn-level failure (payload.error.message) → error part.
+ *  - `result` — the bare terminator line (top-level fields, no payload
+ *      envelope). Carries the sessionId (→ session meta). Its usage is the
+ *      SAME cumulative numbers turn.completed already reported — never emit
+ *      it again.
+ *  - everything else — session.titleUpdated / session.resumed /
+ *      session.updated (20+ plugin hook descriptors per turn), turn.started,
+ *      message.upserted, the permission / checkpoint families, … — noise,
+ *      dropped. So are non-JSON lines: ZCode plugins can print arbitrary
+ *      stdout.
+ */
+function parseZcodeLine(line: string, state: ParseState): AgentParse[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const obj = parsed as Record<string, unknown>;
+  const payload = obj.payload && typeof obj.payload === "object" ? (obj.payload as Record<string, unknown>) : null;
+
+  if (obj.type === "model.streaming" && payload) {
+    const kind = typeof payload.kind === "string" ? payload.kind : "";
+    if (kind === "text_delta" || kind === "reasoning_delta") {
+      const delta = typeof payload.delta === "string" ? payload.delta : "";
+      if (delta.length === 0) return [];
+      return [
+        kind === "text_delta"
+          ? { kind: "delta", text: delta }
+          : { kind: "meta", key: "thinking", value: delta },
+      ];
+    }
+    if (kind === "tool_call") {
+      const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+      const name = typeof payload.toolName === "string" ? payload.toolName : "";
+      if (id && name) {
+        (state.zcodeToolNamesById ??= new Map()).set(id, name);
+      }
+      // A file-write tool call may carry the generated HTML; reuse the same
+      // rescue logic the other adapters apply to Claude-style tool_use
+      // blocks (ZCode's Write tool is {file_path, content} — same shape).
+      const html = rescueHtmlFromToolUse([{ type: "tool_use", name, input: payload.input }]);
+      if (html) return [{ kind: "html", text: html }];
+      if (name) return [{ kind: "meta", key: "status", value: `调用工具 ${name}` }];
+    }
+    return [];
+  }
+
+  if (obj.type === "tool.updated" && payload) {
+    if (payload.kind === "result") {
+      const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+      const name = (id && state.zcodeToolNamesById?.get(id)) || "";
+      if (name) return [{ kind: "meta", key: "status", value: `工具 ${name} 完成` }];
+    }
+    return [];
+  }
+
+  if (obj.type === "turn.completed" && payload) {
+    const out: AgentParse[] = [];
+    const usage = mapZcodeUsage(payload.usage);
+    if (usage) out.push({ kind: "meta", key: "usage", value: usage });
+    if (typeof payload.duration === "number") {
+      out.push({ kind: "meta", key: "duration_ms", value: payload.duration });
+    }
+    if (typeof payload.resultType === "string") {
+      out.push({ kind: "meta", key: "result", value: payload.resultType });
+    }
+    return out;
+  }
+
+  if (obj.type === "turn.failed") {
+    const err = payload && typeof payload.error === "object" ? (payload.error as Record<string, unknown>) : null;
+    const message =
+      err && typeof err.message === "string" && err.message.length > 0 ? err.message : "zcode turn failed";
+    return [{ kind: "error", message }];
+  }
+
+  if (obj.type === "result") {
+    if (typeof obj.sessionId === "string" && obj.sessionId.length > 0) {
+      return [{ kind: "meta", key: "session", value: obj.sessionId }];
+    }
+    return [];
+  }
+
+  return [];
+}
+
+/** ZCode usage (camelCase) → the snake_case keys the consumer layer reads
+ * (same key set Claude's `result.usage` carries: input_tokens /
+ * output_tokens / cache_read_input_tokens / cache_creation_input_tokens). */
+function mapZcodeUsage(usage: unknown): Record<string, number> | null {
+  if (!usage || typeof usage !== "object") return null;
+  const u = usage as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  if (typeof u.inputTokens === "number") out.input_tokens = u.inputTokens;
+  if (typeof u.outputTokens === "number") out.output_tokens = u.outputTokens;
+  if (typeof u.cacheReadTokens === "number") out.cache_read_input_tokens = u.cacheReadTokens;
+  if (typeof u.cacheWriteTokens === "number") out.cache_creation_input_tokens = u.cacheWriteTokens;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function parseLineWithState(agent: string, line: string, state: ParseState): AgentParse[] {
   const trimmed = line.trim();
   if (!trimmed) return [];
@@ -286,33 +431,12 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
 
   // ZCode (argv-attach) — NDJSON event envelope, one JSON object per line:
   //   {"type":"model.streaming","payload":{"kind":"text_delta","delta":"…"},…}
-  // plus a bare {"type":"result",…} terminator line. Only model.streaming
-  // text_delta carries streamed text; every other line — hook-noise
-  // session.updated frames (plugin SessionStart/UserPromptSubmit descriptors
-  // etc., 20+ per turn), turn lifecycle events, the result terminator, and
-  // non-JSON lines — is safely DROPPED. Handled before the shared JSON.parse
-  // so a non-JSON line returns [] here instead of a `noise` part (the invoke
+  // plus a bare {"type":"result",…} terminator line. See parseZcodeLine for
+  // the full event surface. Handled before the shared JSON.parse so a
+  // non-JSON line returns [] here instead of a `noise` part (the invoke
   // layer forwards noise as `raw`, which would flood the log panel).
   if (agent === "zcode") {
-    let zcodeParsed: unknown;
-    try {
-      zcodeParsed = JSON.parse(trimmed);
-    } catch {
-      return [];
-    }
-    if (!zcodeParsed || typeof zcodeParsed !== "object") return [];
-    const zcodeObj = zcodeParsed as Record<string, unknown>;
-    if (zcodeObj.type === "model.streaming" && zcodeObj.payload && typeof zcodeObj.payload === "object") {
-      const payload = zcodeObj.payload as { kind?: string; delta?: string };
-      if (
-        payload.kind === "text_delta" &&
-        typeof payload.delta === "string" &&
-        payload.delta.length > 0
-      ) {
-        return [{ kind: "delta", text: payload.delta }];
-      }
-    }
-    return [];
+    return parseZcodeLine(trimmed, state);
   }
 
   let parsed: unknown;

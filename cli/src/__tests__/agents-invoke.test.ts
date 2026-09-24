@@ -898,7 +898,7 @@ describe("invokeAgent", () => {
       expect(spawnOpts.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe("/user/builtin.json");
     });
 
-    it("bridges model.streaming text_delta lines to {type:'delta'} and safely drops noise lines", async () => {
+    it("bridges the full stream-json surface: deltas, usage/duration/result, session — noise lines produce nothing, usage exactly once", async () => {
       const { child, stdout } = makeFakeChild();
       mockSpawn.mockReturnValue(child);
 
@@ -919,16 +919,108 @@ describe("invokeAgent", () => {
       const events = await eventsPromise;
       const deltas = events.filter((e) => e.type === "delta");
       expect(deltas.map((d) => (d as { text: string }).text)).toEqual(["PRO", "BE", "_OK"]);
-      // Noise envelope lines (session.updated hook frames …), turn.completed,
-      // and the bare result terminator produce NOTHING — dropped, not forwarded
-      // as raw / meta / error events. (The ONE meta event is the #41 bound-model
-      // line emitted after start — not parser output.)
+      // Noise envelope lines (session.updated hook frames …) and turn.started
+      // produce NOTHING — dropped, not forwarded as raw / error events. The
+      // meta events are exactly: the #41 bound-model line after start, then
+      // turn.completed's usage (snake_case) + duration_ms + resultType, then
+      // the result terminator's sessionId. usage appears EXACTLY once — the
+      // terminator's duplicate cumulative numbers are never re-emitted.
       expect(events.filter((e) => e.type === "raw")).toEqual([]);
+      expect(events.filter((e) => e.type === "error")).toEqual([]);
       expect(
         events.filter((e) => e.type === "meta" && e.key !== "model"),
-      ).toEqual([]);
-      expect(events.filter((e) => e.type === "error")).toEqual([]);
+      ).toEqual([
+        {
+          type: "meta",
+          key: "usage",
+          value: {
+            input_tokens: 134370,
+            output_tokens: 4,
+            cache_read_input_tokens: 64,
+            cache_creation_input_tokens: 0,
+          },
+        },
+        { type: "meta", key: "duration_ms", value: 11229 },
+        { type: "meta", key: "result", value: "success" },
+        { type: "meta", key: "session", value: "sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2" },
+      ]);
+      expect(events.filter((e) => e.type === "meta" && e.key === "usage")).toHaveLength(1);
       expect(events[events.length - 1]).toMatchObject({ type: "done", code: 0 });
+    });
+
+    it("bridges reasoning_delta to thinking meta and tool phases to status lines + HTML rescue", async () => {
+      const { child, stdout } = makeFakeChild();
+      mockSpawn.mockReturnValue(child);
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "hi",
+        binOverride: "/resolved/node.exe",
+      });
+
+      await new Promise((r) => setTimeout(r, 0));
+      const eventsPromise = collectStream(stream);
+
+      // Envelope fields (sessionId/turnId/eventId/…) verbatim from the real
+      // capture above; the reasoning_delta / tool_call / tool.updated payload
+      // shapes are pinned in the ZCode open-source contracts
+      // (session.events.ts ModelStreamingPayload / ToolCallResultPayload).
+      stdout.write(
+        [
+          JSON.stringify({ seq: 1, sessionId: "s", type: "model.streaming", payload: { kind: "reasoning_delta", delta: "先想清楚布局" } }),
+          JSON.stringify({ seq: 2, sessionId: "s", type: "model.streaming", payload: { kind: "tool_call", toolCallId: "tc_1", toolName: "WebSearch", input: { query: "css" } } }),
+          JSON.stringify({ seq: 3, sessionId: "s", type: "tool.updated", payload: { kind: "result", toolCallId: "tc_1", result: { success: true, content: "…" }, duration: 42 } }),
+          JSON.stringify({ seq: 4, sessionId: "s", type: "model.streaming", payload: { kind: "tool_call", toolCallId: "tc_2", toolName: "Write", input: { file_path: "C:\\ws\\out.html", content: "<html><body>r</body></html>" } } }),
+          JSON.stringify({ seq: 5, sessionId: "s", type: "tool.updated", payload: { kind: "result", toolCallId: "tc_9_unknown", result: { success: true, content: "…" }, duration: 1 } }),
+        ].join("\n") + "\n",
+      );
+      stdout.end();
+      await new Promise((r) => setImmediate(r));
+      child.emit("close", 0);
+
+      const events = await eventsPromise;
+      expect(
+        events.filter((e) => e.type === "meta" && e.key !== "model"),
+      ).toEqual([
+        { type: "meta", key: "thinking", value: "先想清楚布局" },
+        { type: "meta", key: "status", value: "调用工具 WebSearch" },
+        { type: "meta", key: "status", value: "工具 WebSearch 完成" },
+      ]);
+      // The Write tool's input IS the deliverable — forwarded as a canonical
+      // html event (replaces streamed text), not a status line.
+      expect(events.filter((e) => e.type === "html")).toEqual([
+        { type: "html", text: "<html><body>r</body></html>" },
+      ]);
+      // The nameless result (no preceding tool_call for tc_9_unknown) emits
+      // no status line at all — a bare ✓ with no context is noise.
+    });
+
+    it("maps turn.failed to an error event (consumer-side red-error gate fires on it)", async () => {
+      const { child, stdout } = makeFakeChild();
+      mockSpawn.mockReturnValue(child);
+
+      const stream = invokeAgent({
+        agent: "zcode",
+        prompt: "hi",
+        binOverride: "/resolved/node.exe",
+      });
+
+      await new Promise((r) => setTimeout(r, 0));
+      const eventsPromise = collectStream(stream);
+
+      // Verbatim-captured real failure line (diag-fresh-stdout.jsonl):
+      // fresh-config turn whose model binding never resolved.
+      stdout.write(
+        `{"eventId":"d66c6937-6bd7-4f3d-a38a-43d252a1e052","payload":{"error":{"type":"unknown_error","attribution":{"retryable":false},"code":"CONFIGURATION_ERROR","message":"Select a model before continuing","detail":"Model creation failed"},"turnPhase":"model_creation"},"seq":1,"sessionId":"sess_b154be6b-7148-4098-8d80-6f717ce7bdb8","timestamp":1790041331523,"turnId":"turn_28ed2805-a161-450f-a426-9f3182f003bb","type":"turn.failed"}\n`,
+      );
+      stdout.end();
+      await new Promise((r) => setImmediate(r));
+      child.emit("close", 1);
+
+      const events = await eventsPromise;
+      expect(events.filter((e) => e.type === "error")).toEqual([
+        { type: "error", message: "Select a model before continuing" },
+      ]);
     });
 
     it("writes the full prompt to the attach temp file — not on argv, not on stdin", async () => {

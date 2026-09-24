@@ -450,6 +450,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
             if (part.kind === "delta") safeEnqueue({ type: "delta", text: part.text });
             else if (part.kind === "html") safeEnqueue({ type: "html", text: part.text });
             else if (part.kind === "meta") safeEnqueue({ type: "meta", key: part.key, value: part.value });
+            else if (part.kind === "error") safeEnqueue({ type: "error", message: part.message });
             else safeEnqueue({ type: "raw", text: line.slice(0, 240) });
           }
         }
@@ -526,6 +527,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
               if (part.kind === "delta") safeEnqueue({ type: "delta", text: part.text });
               else if (part.kind === "html") safeEnqueue({ type: "html", text: part.text });
               else if (part.kind === "meta") safeEnqueue({ type: "meta", key: part.key, value: part.value });
+              else if (part.kind === "error") safeEnqueue({ type: "error", message: part.message });
             }
           }
         }
