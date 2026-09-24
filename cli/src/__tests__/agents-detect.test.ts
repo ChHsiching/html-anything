@@ -47,10 +47,10 @@ vi.mock("node:fs", async () => {
 // binding module. Mock ONLY the two IO readers; everything else stays the
 // real implementation so future exports keep working under this mock (the
 // T3/#29 unmocked-export lesson).
-vi.mock("@html-anything/zcode-protocol/zcode-model-binding", async () => {
+vi.mock("../zcode-model-binding.js", async () => {
   const actual = await vi.importActual<
-    typeof import("@html-anything/zcode-protocol/zcode-model-binding")
-  >("@html-anything/zcode-protocol/zcode-model-binding");
+    typeof import("../zcode-model-binding.js")
+  >("../zcode-model-binding.js");
   return {
     ...actual,
     readZcodeReadyState: () => bindingReadyState,

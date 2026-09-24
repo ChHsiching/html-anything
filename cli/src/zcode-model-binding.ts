@@ -91,7 +91,11 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { isRecord } from "./internal";
+/** Narrow `unknown` to a plain JSON object (not null, not an array). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 
 /** Env var carrying the personal provider config (name from ZCode's runtime-paths.ts). */
 export const ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV = "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE";
@@ -139,7 +143,7 @@ export interface ZcodeModelSelection {
   reasoningLevel: string;
 }
 
-/** ─── Default paths (self-contained; same locations as zcode-model-picker) ─── */
+/** ─── Default paths (self-contained) ─── */
 
 export function defaultZcodeSettingPath(): string {
   return join(homedir(), ".zcode", "v2", "setting.json");
@@ -962,7 +966,6 @@ export function zcodeProviderEnvPairSet(env: Readonly<NodeJS.ProcessEnv>): boole
   return Boolean(personal && builtin);
 }
 
-/** Convenience: the paired env values for a prepared binding. */
 /** Convenience: the paired env values for a prepared binding. */
 export function zcodeBindingEnv(
   result: Extract<ZcodeBindingResult, { ok: true }>,

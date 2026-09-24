@@ -31,7 +31,7 @@ export type AgentInfo = {
    * "已安装 · 未就绪" card state. Absent for every other agent.
    */
   ready?: boolean;
-  notReadyReason?: import("@html-anything/zcode-protocol/zcode-model-binding").ZcodeNotReadyReason;
+  notReadyReason?: import("./agents/zcode-model-binding").ZcodeNotReadyReason;
 };
 
 export type ConvertStatus = "idle" | "running" | "done" | "error";

@@ -8,7 +8,7 @@ import {
   prepareZcodeModelBinding,
   zcodeBindingEnv,
   zcodeProviderEnvPairSet,
-} from "@html-anything/zcode-protocol/zcode-model-binding";
+} from "./zcode-model-binding";
 
 export type InvokeOpts = {
   agent: string;

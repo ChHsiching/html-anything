@@ -14,9 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "dependencies": {
-    "@html-anything/zcode-protocol": "workspace:*"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^20",
     "tsx": "^4.22.1",

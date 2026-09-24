@@ -6,7 +6,7 @@ import {
   readZcodePlanModelOptions,
   readZcodeReadyState,
   type ZcodeNotReadyReason,
-} from "@html-anything/zcode-protocol/zcode-model-binding";
+} from "./zcode-model-binding";
 
 /**
  * Per-agent invocation protocol. Determines what `invokeAgent` does with the

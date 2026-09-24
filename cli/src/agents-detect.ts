@@ -6,7 +6,7 @@ import {
   readZcodePlanModelOptions,
   readZcodeReadyState,
   type ZcodeNotReadyReason,
-} from "@html-anything/zcode-protocol/zcode-model-binding";
+} from "./zcode-model-binding.js";
 
 /**
  * Agent detection — adapted from next/src/lib/agents/detect.ts

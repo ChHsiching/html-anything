@@ -1,7 +1,5 @@
 import type { NextConfig } from "next";
 
-const nextConfig: NextConfig = {
-  transpilePackages: ["@html-anything/zcode-protocol"],
-};
+const nextConfig: NextConfig = {};
 
 export default nextConfig;

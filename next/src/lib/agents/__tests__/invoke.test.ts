@@ -53,10 +53,10 @@ vi.mock("node:fs", async () => {
   };
 });
 
-vi.mock("@html-anything/zcode-protocol/zcode-model-binding", async () => {
+vi.mock("../zcode-model-binding", async () => {
   const actual = await vi.importActual<
-    typeof import("@html-anything/zcode-protocol/zcode-model-binding")
-  >("@html-anything/zcode-protocol/zcode-model-binding");
+    typeof import("../zcode-model-binding")
+  >("../zcode-model-binding");
   return { ...actual, prepareZcodeModelBinding: mockPrepareBinding };
 });
 

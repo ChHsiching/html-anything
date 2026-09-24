@@ -28,7 +28,7 @@ import {
   zcodeProviderEnvPairSet,
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV,
   ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV,
-} from "./zcode-model-binding";
+} from "../zcode-model-binding.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -923,12 +923,12 @@ describe("zcodeProviderEnvPairSet", () => {
       zcodeProviderEnvPairSet({
         [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: "/tmp/a.json",
         [ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]: "/tmp/b.json",
-      } as NodeJS.ProcessEnv),
+      } as unknown as NodeJS.ProcessEnv),
     ).toBe(true);
     expect(
       zcodeProviderEnvPairSet({
         [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: "/tmp/a.json",
-      } as NodeJS.ProcessEnv),
+      } as unknown as NodeJS.ProcessEnv),
     ).toBe(false);
     expect(zcodeProviderEnvPairSet({} as NodeJS.ProcessEnv)).toBe(false);
   });
