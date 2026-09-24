@@ -1,6 +1,6 @@
 /**
  * Deterministic per-turn model binding for the ZCode CLI one-shot adapter
- * (#41 / spec #34 v2 "模型绑定跟随 GUI 选择").
+ * (model binding follows the ZCode GUI's selected plan).
  *
  * ZCode's CLI has no `--model` flag. A fresh `-p` session resolves its model
  * via `resolveInitialModelSelection` (packages/provider/src/
@@ -10,22 +10,21 @@
  * `validateModelSelectionOptions` with `reasoning-level-missing` — silently
  * falls back to the FIRST visible registry provider with the LAST reasoning
  * variant (`values.at(-1)`, "构造最高档"). That fallback is unobservable from
- * outside and can route a turn to a provider the user never chose (live-proven
- * 2026-09-21: a fresh turn landed on a custom WeChat gateway with
+ * outside and can route a turn to a provider the user never chose (live-verified:
+ * a fresh turn landed on a custom WeChat gateway with
  * `reasoning_effort=max`, which that gateway rejects → ProviderBusinessError
- * 400, exit 1 — probe artifacts in
- * .scratch/zcode-opensource/probe-cli-oneshot/). Adapter-side pre-validation
- * is therefore the ONLY reliable defense, per spec: every turn binds
+ * 400, exit 1). Adapter-side pre-validation
+ * is therefore the ONLY reliable defense: every turn binds
  * explicitly, and any broken link in the resolution chain refuses the spawn
  * with an actionable error instead of silently rerouting.
  *
- * The binding mechanism (live-proven by probe provemodel.mjs + diag6, then
- * extended 2026-09-24 after the identity-bridge discovery — probe41-fix.mjs):
+ * The binding mechanism (live-verified by probe provemodel.mjs + diag6, then
+ * extended after the identity-bridge discovery — probe41-fix.mjs):
  * clone the user's `~/.zcode/v2/provider_config.json` to a temp file, write
  * the exact `config.defaultModelSelection` into the clone, and hand the child
  * the PAIRED env vars `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` (the clone) +
  * `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` (the same bundled catalog file we
- * validated against — "读哪份传哪份", so the validation view IS the runtime
+ * validated against, so the validation view IS the runtime
  * view). The pairing is hard-required by the CLI
  * (packages/provider-node/src/runtime-paths.ts: setting exactly one of the two
  * throws "ZCode Built-in 与 Personal Provider Config 路径必须同时提供"; earlier
@@ -46,11 +45,11 @@
  * re-checked every turn, idempotent). A user who ran `zcode login` already has
  * the key and no write ever happens. This is the one deliberate exception to
  * the zero-user-write posture — chosen over redirecting ZCODE_DATA_BASE_DIR to
- * a temp clone (tried, e9df98f: correct binding but the whole data dir —
+ * a temp clone (tried: correct binding but the whole data dir —
  * sessions, logs, plugin caches — moves and dies with the turn, GUI-invisible
  * and ~10x slower); a product cannot ask every user to run `zcode login`.
  *
- * Read surface (all private ZCode formats — spec risk register):
+ * Read surface (all private ZCode formats):
  *   - `~/.zcode/v2/setting.json` — current keys `providerFamilyDomain` +
  *     `providerFamilyConnectionSelections`; legacy keys
  *     `modelProviderFamilySelectedKeys` (+ `modelProviderFamilyModes`) are the
@@ -74,7 +73,7 @@
  * via overlay, so the LAST matching rule that specifies
  * `optionSpecs.reasoningLevel.values` wins; a rule matches when
  * `^(?:<modelMatch>)$` case-insensitively full-matches the model id. Known
- * divergence (documented, spec-pinned): the GUI renders some plan models'
+ * divergence (documented): the GUI renders some plan models'
  * levels from a server-driven path (e.g. GLM-5.3 shows 低/高/最高 there) while
  * modelRules yield e.g. disabled/enabled — this module follows modelRules,
  * which is exactly what the CLI validates `defaultModelSelection` against, so
@@ -389,13 +388,13 @@ function compareVersionDirs(a: string, b: string): number {
 
 function isCatalogShape(data: unknown): boolean {
   if (!isRecord(data)) return false;
-  // schemaVersion gate (spec risk register: v1 unchanged to date).
+  // schemaVersion gate (v1 unchanged to date).
   if (data.schemaVersion !== 1) return false;
   return isRecord(data.config);
 }
 
 /**
- * Locate + read the builtin catalog. Order (spec): the install-bundled file
+ * Locate + read the builtin catalog. Order: the install-bundled file
  * first (version-consistent with the spawned cjs by construction), then the
  * runtime cache by freshness (highest version dir, newest file within it).
  * Returns null when neither yields a schema-valid file — the
@@ -595,7 +594,7 @@ export interface ZcodePlanModelOption {
  * the plan providerId. Returns an empty list when the catalog is unreadable —
  * the caller keeps the static [DEFAULT_MODEL] floor and lets the invoke-time
  * refusal surface the actionable error. Shared by the next + cli detect
- * mirrors so the mapping cannot drift (#41).
+ * mirrors so the mapping cannot drift.
  */
 export function readZcodePlanModelOptions(opts: {
   cjsPath: string;
@@ -621,7 +620,7 @@ export function readZcodePlanModelOptions(opts: {
  * provider ids migrated), else the plan's first enabled model with its last
  * reasoning level. Read-only (never touches the credential store); shared by
  * the next + cli detect mirrors so the Default chip label cannot drift from
- * what the invoke layer actually binds (#38).
+ * what the invoke layer actually binds.
  */
 export interface ZcodePlanDefaultChoice {
   modelId: string;
@@ -725,8 +724,8 @@ function findCodingPlanApiKeyEntry(
  * user's real files are never touched (zero-write contract,
  * snapshot-asserted in tests).
  *
- * The identity bridge is load-bearing (live-proven 2026-09-24,
- * .scratch/.../probe41-fix.mjs): the headless CLI materializes an account
+ * The identity bridge is load-bearing (live-verified,
+ * probe41-fix.mjs): the headless CLI materializes an account
  * Coding-Plan provider ONLY when the credential store holds its `identity`
  * key — a key the GUI never writes (only `zcode login` does) — and a provider
  * without it is absent from the registry, which makes our
@@ -743,7 +742,7 @@ function findCodingPlanApiKeyEntry(
  * `completeNewModelSelection` convention, `values.at(-1)`). Any OTHER string
  * is an explicit pick: it must decode to `"<modelId>/<level>"` AND validate
  * inside the plan, else the matching refusal fires — a bare/stale model id
- * (e.g. persisted by a pre-#41 UI) never silently reroutes. Either way the
+ * (e.g. persisted by an older UI) never silently reroutes. Either way the
  * turn is deterministically bound — there is no path that leaves the CLI to
  * its silent registry fallback.
  */
@@ -875,9 +874,9 @@ function resolveSelection(
 ): { ok: true; selection: ZcodeModelSelection } | { ok: false; code: ZcodeBindingRefusal; message: string } {
   if (model !== undefined && model !== "default") {
     // An EXPLICIT pick must decode to "<modelId>/<level>" and validate inside
-    // the plan — anything else (a bare model id persisted by a pre-#41 UI, a
+    // the plan — anything else (a bare model id persisted by an older UI, a
     // stale chip id after a plan change) REFUSES rather than silently binding
-    // the plan default. The silent-reroute class is exactly what #41 exists
+    // the plan default. The silent-reroute class is exactly what this refusal exists
     // to close.
     const pick = decodeZcodeModelChoice(model);
     if (!pick) {
@@ -959,7 +958,7 @@ function resolveDefaultSelection(
 
 /** True when the environment already carries BOTH provider-config vars — the
  * user's zero-code reroute. The invoke layer then passes them through
- * untouched and skips its own binding (spec user story 10). */
+ * untouched and skips its own binding. */
 export function zcodeProviderEnvPairSet(env: Readonly<NodeJS.ProcessEnv>): boolean {
   const personal = env[ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]?.trim();
   const builtin = env[ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]?.trim();

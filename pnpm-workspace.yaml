@@ -2,7 +2,6 @@ packages:
   - cli
   - e2e
   - next
-  - packages/*
 
 ignoredBuiltDependencies:
   - sharp

@@ -1,4 +1,4 @@
-// Unit tests for the per-turn model binding (#41 / spec #34 v2): plan
+// Unit tests for the per-turn model binding: plan
 // selection from the GUI settings (current keys + legacy fallback), catalog
 // resolution (install-bundled first, cache by freshness), the model×level
 // table from modelRules, the four-link refusal chain, the temp-clone write
@@ -34,7 +34,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // ─── Shared fixture shapes (mirroring the live install's files) ─────────────
 
-/** Live-captured legacy setting.json shape (2026-09-24, ZCode 3.14.3 that
+/** Live-captured legacy setting.json shape (ZCode 3.14.3 that
  * migrated in-memory but retained the legacy fields on disk). */
 const LEGACY_SETTING = {
   modelProviderFamilyModes: { zai: "oauth", bigmodel: "oauth" },
@@ -617,7 +617,7 @@ describe("prepareZcodeModelBinding", () => {
     // ZERO-WRITE contract: the user's real file is byte-identical.
     expect(readFileSync(f.personalPath, "utf8")).toBe(before);
 
-    // Identity bridge (#41 fix): the REAL credential store gains EXACTLY the
+    // Identity bridge: the REAL credential store gains EXACTLY the
     // one identity key (plaintext, derived from the GUI's own api-key key
     // name — the headless registry materializes account providers only with
     // it); every pre-existing key and value is untouched, and a second
@@ -820,28 +820,26 @@ describe("prepareZcodeModelBinding", () => {
   });
 });
 
-// ─── The live-proven binding discriminator (#41 AC) ─────────────────────────
+// ─── The live-proven binding discriminator ────────────────────────────────
 //
 // On the probe host (installed ZCode 3.14.1, CLI bundle 0.16.9) the two arms
-// of the discriminator were live-verified 2026-09-21/22:
+// of the discriminator were live-verified:
 //   WRONG binding (fresh session, no explicit defaultModelSelection): the
 //   CLI's silent registry-fallback picked the FIRST visible provider — the
 //   custom WeChat gateway 42c7e100-… — with reasoning 'max' (values.at(-1)),
 //   whose gateway answers 400 → exit 1. Captured verbatim below.
 //   RIGHT binding (temp clone + defaultModelSelection targeting the plan):
-//   exit 0, PROBE_OK (probe provemodel.mjs + diag6.cjs; artifacts in
-//   .scratch/zcode-opensource/probe-cli-oneshot/).
+//   exit 0, PROBE_OK (probe provemodel.mjs + diag6.cjs).
 // The adapter's written selection must therefore ALWAYS be a plan-provider
 // triple with an explicit level — the shape the success arm proved.
 
-describe("binding discriminator (live-proven, 2026-09-21/22)", () => {
+describe("binding discriminator (live-verified)", () => {
   const wrongBindingStderr = readFileSync(
     join(here, "__fixtures__", "zcode-wrong-binding.stderr.txt"),
     "utf8",
   );
   // The exit-0 arm's captured evidence: the turn.completed + result lines of
-  // the diag6 run that completed under the paired redirect (probe artifact
-  // .scratch/zcode-opensource/probe-cli-oneshot/diag6-stdout.jsonl).
+  // the diag6 run that completed under the paired redirect.
   const rightBindingStdout = readFileSync(
     join(here, "__fixtures__", "zcode-right-binding.stdout.jsonl"),
     "utf8",

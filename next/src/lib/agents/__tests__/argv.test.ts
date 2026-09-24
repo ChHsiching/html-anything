@@ -222,21 +222,17 @@ describe("parseLine bob", () => {
 
 // Real NDJSON lines captured from the installed ZCode CLI (3.14.1 desktop
 // bundle, zcode 0.16.9) running `-p … --output-format stream-json --mode
-// yolo` headless. The parser contract is pinned against these real bytes.
-// Source probe artifact:
-// .scratch/zcode-opensource/probe-cli-oneshot/streamcheck-stdout.jsonl
-// (captured 2026-09-22). Noise vocabulary on a single turn:
+// yolo` headless. The parser contract is pinned against these real bytes —
+// captured from a live probe run. Noise vocabulary on a single turn:
 // session.titleUpdated / session.resumed / session.updated (plugin hook
 // descriptors), turn.started, the model.streaming kinds, turn.completed, and
 // the bare result terminator line.
 describe("parseLine zcode (argv-attach stream-json)", () => {
   // Real NDJSON lines captured from the installed ZCode CLI (3.14.1 desktop
   // bundle, zcode 0.16.9) running `-p … --output-format stream-json --mode
-  // yolo` headless. The parser contract is pinned against these real bytes.
-  // Source probe artifacts:
-  //   .scratch/zcode-opensource/probe-cli-oneshot/streamcheck-stdout.jsonl
-  //   .scratch/zcode-opensource/probe-cli-oneshot/diag-fresh-stdout.jsonl
-  // (captured 2026-09-22). The probes' turns were plain-text replies, so the
+  // yolo` headless. The parser contract is pinned against these real bytes —
+  // captured from live probe runs. The probes' turns were plain-text replies,
+  // so the
   // reasoning_delta / tool_call / tool.updated lines below reuse the REAL
   // envelope (eventId/seq/sessionId/timestamp fields verbatim from the
   // captures) around payload shapes pinned in the ZCode open-source

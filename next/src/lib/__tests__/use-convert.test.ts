@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { zcodeTurnFailed } from "../use-convert";
 
-describe("zcodeTurnFailed (#41 zcode gate)", () => {
+describe("zcodeTurnFailed (zcode gate)", () => {
   it("zcode: an error event fails the turn (refused binding / spawn failure)", () => {
     expect(zcodeTurnFailed("zcode", "error", { message: "ZCode: no model plan found…" })).toBe(true);
   });

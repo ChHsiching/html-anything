@@ -31,7 +31,7 @@ export type AgentProtocol = "stdin" | "argv" | "argv-message" | "argv-attach" | 
 
 /**
  * A model picker entry. `id`/`label` are the universal surface every agent's
- * picker reads. `providerId` is OPTIONAL and ZCode-only (#41): ZCode's plan
+ * picker reads. `providerId` is OPTIONAL and ZCode-only: ZCode's plan
  * chips belong to the GUI-selected plan's catalog provider, and the per-turn
  * binding writes that `{ providerId, modelId, reasoningLevel }` into the
  * provider-config clone the spawn hands the CLI. Absent for every other agent
@@ -44,7 +44,7 @@ export type ModelOption = { id: string; label: string; providerId?: string };
 export const DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (CLI config)" };
 
 /**
- * ZCode's static picker floor (#38). NOT the generic {@link DEFAULT_MODEL}:
+ * ZCode's static picker floor. NOT the generic {@link DEFAULT_MODEL}:
  * ZCode has no `--model` flag and no "CLI config picks" semantics — Default
  * always means "whatever the GUI plan's current default resolves to", so even
  * the floor label must not imply a CLI-side default.
@@ -56,7 +56,7 @@ const ZCODE_DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (ZCode
  * the `zcode.cjs` bundle belongs. Filled at detect time (availability) and
  * invoke time (the actual spawn) by {@link resolveZcodeBin}. Exported so the
  * invoke layer substitutes the same token, not a brittle string literal copy
- * (a typo there would silently spawn the literal). See ADR-0002 decision 3.
+ * (a typo there would silently spawn the literal).
  */
 export const ZCODE_CJS_SENTINEL = "<resolved-zcode-cjs>";
 
@@ -75,7 +75,6 @@ export type AgentDef = {
    * `node <resolvedCjsPath> -p …` rather than as a standalone exec — argv[1]
    * has to be the cjs (a bare executable is rejected by Node as an arg).
    * Optional and defaults to absent, so existing adapters are unaffected.
-   * See ADR-0002 decision 3.
    */
   binArgs?: string[];
   /**
@@ -378,7 +377,7 @@ export const AGENTS: AgentDef[] = [
   // fallbackModels is the static [ZCODE_DEFAULT_MODEL] floor: the CLI has no
   // --model flag, so per-turn model selection travels as a
   // defaultModelSelection clone (detectAgents' argv-attach branch below +
-  // the invoke layer's paired-env binding, #41).
+  // the invoke layer's paired-env binding).
   {
     id: "zcode",
     label: "ZCode",
@@ -503,10 +502,10 @@ export function resolveOnPath(bin: string): string | null {
   return null;
 }
 
-// ─── Linux install discovery (.deb + AppImage; ADR-0007 / ADR-0010) ────
+// ─── Linux install discovery (.deb + AppImage) ────────────────────────
 //
 // ZCode's official Linux distributions are the `.deb` package AND the AppImage
-// (ADR-0007's "AppImage-only" premise was wrong — corrected by T5 / ADR-0010).
+// (the original AppImage-only assumption was wrong).
 // The two are told apart by a loose `zcode.cjs`:
 //   - `.deb` installs to /opt/ZCode/ with a loose resources/glm/zcode.cjs next
 //     to the Electron binary (/opt/ZCode/zcode) — the same layout as the
@@ -518,7 +517,7 @@ export function resolveOnPath(bin: string): string | null {
 //     (`~/.local/share/applications/zcode.desktop`); its `Exec=` line carries
 //     the real path whatever the user named/placed the file. The same bar as
 //     login — a user must have run ZCode once — and a freedesktop.org standard
-//     honoured by every Linux desktop. See ADR-0007 decision 1 + ADR-0010.
+//     honoured by every Linux desktop.
 
 /** Path to the XDG `.desktop` entry ZCode generates on first GUI launch. */
 const ZCODE_DESKTOP_PATH = posix.join(
@@ -544,7 +543,7 @@ const ZCODE_DESKTOP_PATH = posix.join(
  *
  * The first token after `Exec=` is the AppImage path (whatever the user
  * named/placed the file); trailing flags (`--no-sandbox`, `%U`, …) and the
- * freedesktop field codes are stripped. See ADR-0007 decision 1.
+ * freedesktop field codes are stripped.
  */
 export function parseZcodeDesktopExec(content: string): string | null {
   for (const rawLine of content.split(/\r?\n/)) {
@@ -576,7 +575,7 @@ export function parseZcodeDesktopExec(content: string): string | null {
  * generates on first GUI launch. The `Exec=` line carries the real path
  * whatever the user named/placed the file, so no filename guessing or glob is
  * needed. Returns `null` (never throws) when the entry is missing or malformed
- * — the caller treats that as "ZCode not found". See ADR-0007 decision 1.
+ * — the caller treats that as "ZCode not found".
  */
 export function discoverZcodeAppImage(): string | null {
   try {
@@ -588,10 +587,10 @@ export function discoverZcodeAppImage(): string | null {
 }
 
 /**
- * Locate the ZCode CLI binary. Probe order, first match wins (see ADR-0007):
+ * Locate the ZCode CLI binary. Probe order, first match wins:
  *   1. `ZCODE_BIN` env var — user override (absolute path, else PATH lookup)
  *   2. `zcode` on PATH — a defensive probe only. ZCode's official Linux
- *      distributions are the `.deb` and the AppImage (ADR-0007 / ADR-0010), so
+ *      distributions are the `.deb` and the AppImage, so
  *      this rarely hits; it is NOT a supported install shape (no PATH shim is
  *      known to ship with either).
  *   3. Platform default:
@@ -603,15 +602,15 @@ export function discoverZcodeAppImage(): string | null {
  *                  same loose-file layout as Windows/macOS); else the AppImage
  *                  path from the `.desktop` `Exec=` line (the `.cjs` lives
  *                  inside the mount, so the AppImage binary doubles as the
- *                  availability signal AND the Electron driver, ADR-0007).
+ *                  availability signal AND the Electron driver).
  *
  * On Windows/macOS (and a Linux `.deb`) the returned path IS the `.cjs` bundle.
  * On a Linux AppImage install the platform default is the AppImage binary (the
  * `.cjs` path is computed post-mount in the invoke layer); a `ZCODE_BIN` or
  * on-disk `.cjs` is returned as-is — the invoke layer then uses it directly,
- * no mount (ADR-0010 decision 1).
+ * no mount.
  *
- * Discovery only — registering ZCode in the `AGENTS` array is T7. Returns
+ * Discovery only. Returns
  * `null` (never throws) when nothing is found.
  */
 export function resolveZcodeBin(): string | null {
@@ -624,18 +623,18 @@ export function resolveZcodeBin(): string | null {
     if (onPath) return onPath;
   }
   // 2. `zcode` on PATH — defensive probe only; not a supported Linux install
-  // (ZCode ships as a `.deb` or AppImage per ADR-0007 / ADR-0010), kept so a
+  // (ZCode ships as a `.deb` or AppImage), kept so a
   // hand-placed link still resolves. The override (1) and platform default (3)
   // are the real paths.
   const pathHit = resolveOnPath("zcode");
   if (pathHit) return pathHit;
   // 3. Platform default.
   if (process.platform === "linux") {
-    // T5 / ADR-0010: probe the on-disk `.cjs` BEFORE the AppImage mount. A
+    // Probe the on-disk `.cjs` BEFORE the AppImage mount. A
     // loose resources/glm/zcode.cjs at the install root cleanly distinguishes
     // a `.deb` (or unpacked) install from an AppImage (the `.cjs` is packed in
     // the squashfs, so no loose file sits next to it). The invoke layer's
-    // `.cjs`-direct branch (T4) then runs it without mounting.
+    // `.cjs`-direct branch then runs it without mounting.
     for (const candidate of defaultZcodeCjsPaths()) {
       if (existsSync(candidate)) return candidate;
     }
@@ -658,9 +657,9 @@ export function resolveZcodeBin(): string | null {
  *
  * macOS/Linux paths are built with `posix` separators so they stay
  * forward-slash regardless of the *host* running the probe — these are
- * spec-fixed install locations (see CONTEXT.md → "ZCode install discovery")
- * and must not be rewritten when the host is, say, Windows running a
- * cross-platform unit test. Windows paths keep backslash separators.
+ * fixed install locations and must not be rewritten when the host is, say,
+ * Windows running a cross-platform unit test. Windows paths keep backslash
+ * separators.
  */
 export function defaultZcodeCjsPaths(): string[] {
   const platform = process.platform;
@@ -679,23 +678,22 @@ export function defaultZcodeCjsPaths(): string[] {
   if (platform === "darwin") {
     return [posix.join("/Applications/ZCode.app", "Contents", "Resources", "glm", "zcode.cjs")];
   }
-  // T5 / ADR-0010: the official `.deb` install lays a loose
+  // The official `.deb` install lays a loose
   // resources/glm/zcode.cjs at /opt/ZCode/ (same layout as Windows/macOS), so
   // it is probed the same way. An AppImage packs the `.cjs` inside its
   // squashfs (no loose file), so when only the AppImage is installed this
   // candidate misses and resolveZcodeBin() falls back to `.desktop` discovery.
-  // See ADR-0007 decision 1 + ADR-0010.
   return [posix.join("/opt/ZCode", "resources", "glm", "zcode.cjs")];
 }
 
 /**
  * Resolve the NODE binary that drives `node <zcode.cjs> -p …` for an
- * EXTERNAL caller (#12 / T12). `resolveZcodeBin()` above locates the `.cjs`
+ * EXTERNAL caller. `resolveZcodeBin()` above locates the `.cjs`
  * bundle; this locates the node the `.cjs` is run with — a distinct concern,
  * because html-anything is an external process and on a clean Windows host
  * `where node` finds nothing (only `ZCode.exe` exists).
  *
- * Strategy (proven against a live clean-host probe on 2026-08-10, not guessed):
+ * Strategy (proven against a live clean-host probe, not guessed):
  *   1. `ZCODE_NODE_BIN` env — explicit user override (absolute path, else PATH).
  *   2. `node` on PATH — system Node. Preferred when present: it needs no
  *      ELECTRON_RUN_AS_NODE env, and is the simplest portable driver.
@@ -713,7 +711,7 @@ export function defaultZcodeCjsPaths(): string[] {
  * `zcode.cjs` existing ⟺ ZCode is installed ⟺ the same install directory holds
  * the bundled Electron exe. So for any UI-driven caller the probe hits one of
  * the three steps and the `null` outcome is unreachable; its return type was
- * tightened from `string | null` to `string` (T15 / #18 / ADR-0005 decision 3).
+ * tightened from `string | null` to `string`.
  * The one caller that can still miss all three probes is a hand-crafted
  * `ZCODE_BIN` at an orphaned `.cjs` (no sibling exe, no system node, no
  * `ZCODE_NODE_BIN`) — for that path the resolver returns the canonical install
@@ -738,7 +736,7 @@ export function resolveZcodeNodeBin(): string {
   // (zcode.cjs found ⟺ ZCode installed ⟺ exe exists). Return it on the miss
   // path too — see the doc comment above for the orphaned-.cjs rationale.
   if (process.platform === "linux") {
-    // T5 / ADR-0010: probe the `.deb` Electron driver (/opt/ZCode/zcode) BEFORE
+    // Probe the `.deb` Electron driver (/opt/ZCode/zcode) BEFORE
     // the AppImage. Same role as ZCode.exe on Windows — under
     // ELECTRON_RUN_AS_NODE=1 it acts as node — and a `.deb`-only host has no
     // AppImage to mount, so without this probe it could not drive the `.cjs`.
@@ -790,7 +788,7 @@ export function defaultZcodeElectronExePaths(): string[] {
   if (platform === "darwin") {
     return [posix.join("/Applications/ZCode.app", "Contents", "MacOS", "ZCode")];
   }
-  // T5 / ADR-0010: the `.deb` install ships /opt/ZCode/zcode (the Electron
+  // The `.deb` install ships /opt/ZCode/zcode (the Electron
   // binary, driven under ELECTRON_RUN_AS_NODE=1 as node); the AppImage is itself
   // the executable. The `.deb` driver is listed first so resolveZcodeNodeBin()
   // probes it before AppImage discovery.
@@ -816,7 +814,7 @@ export type DetectedAgent = {
   /** True when the adapter cannot be invoked yet (acp / pi-rpc). */
   unsupported?: boolean;
   /**
-   * ZCode-only (#41): installed ≠ ready. True when the GUI plan resolves AND
+   * ZCode-only: installed ≠ ready. True when the GUI plan resolves AND
    * its family is logged in; false with {@link notReadyReason} when the user
    * still needs to open/log into the GUI. The settings card renders the amber
    * "已安装 · 未就绪" state from these. Absent for every other agent (no
@@ -847,17 +845,17 @@ export function detectAgents(): DetectedAgent[] {
     // would wrongly report `node` (bin) as the install, so ZCode gets its own
     // detection: available iff the .cjs resolves. resolvedBin is the node
     // driver the spawn path will use (node <cjs> -p …): resolveZcodeNodeBin()
-    // (the real node or Electron-exe fallback). T15 (#18 / ADR-0005 decision 3)
-    // tightened that resolver's return to `string` — the Electron-exe fallback
-    // is terminal and present whenever detect passed (zcode.cjs found ⟺ ZCode
-    // installed ⟺ exe exists), so there is no null to coalesce here.
+    // (the real node or Electron-exe fallback) — that resolver's return is
+    // tightened to `string`: the Electron-exe fallback is terminal and present
+    // whenever detect passed (zcode.cjs found ⟺ ZCode installed ⟺ exe
+    // exists), so there is no null to coalesce here.
     //
-    // #41 — the picker lists the GUI-selected PLAN's models × reasoning
+    // The picker lists the GUI-selected PLAN's models × reasoning
     // levels, read from setting.json + the install-bundled catalog (the same
     // sources the invoke layer binds against — see
     // zcode-model-binding.ts). Chips carry ids of the form
     // "<modelId>/<level>" plus the plan providerId; the "default" entry binds
-    // the plan's own default at invoke time. #38 — the Default chip LABEL
+    // the plan's own default at invoke time. The Default chip LABEL
     // names what Default currently resolves to (the same precedence the
     // invoke layer applies), so the chip never promises something stale.
     // Reads are gated on availability (an unavailable install keeps the

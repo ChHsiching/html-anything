@@ -19,9 +19,9 @@ const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockR
     mockMkdtempSync: vi.fn((prefix: string) => `${prefix}TEST`),
     mockWriteFileSync: vi.fn(),
     mockRmSync: vi.fn(),
-    // #41: the per-turn model binding seam. invoke calls ONE function from
+    // The per-turn model binding seam. invoke calls ONE function from
     // the protocol package; everything else in that module stays real (the
-    // T3/#29 unmocked-export lesson). The ok-result is the shape a real
+    // unmocked-export lesson). The ok-result is the shape a real
     // prepared binding returns; refusal tests swap `mockPrepareBinding.mockReturnValue`.
     mockPrepareBinding: vi.fn(),
     bindingOkResult: {
@@ -99,7 +99,7 @@ async function collectStream(
 }
 
 /**
- * Script the fake AppImage mount child for ADR-0007 Linux self-mount tests.
+ * Script the fake AppImage mount child for the Linux self-mount tests.
  * The real `AppImage --appimage-mount` prints the FUSE mount point to stdout
  * (first line) and stays alive holding the mount. Here the mount point is
  * written on a setTimeout(0) so the helper's stdout listener is attached
@@ -127,9 +127,8 @@ const BIN_OVERRIDE = "/bin/sh";
 // Real NDJSON lines captured from the installed ZCode CLI (3.14.1 desktop
 // bundle, zcode 0.16.9) running `-p … --output-format stream-json --mode
 // yolo` headless. The adapter's parser and invoke plumbing are pinned against
-// these real bytes, not a hand-written sketch. Source probe artifact:
-// .scratch/zcode-opensource/probe-cli-oneshot/streamcheck-stdout.jsonl
-// (captured 2026-09-22). Includes the full noise vocabulary observed on a
+// these real bytes, not a hand-written sketch — captured from a live probe
+// run. Includes the full noise vocabulary observed on a
 // single turn: session.titleUpdated / session.resumed / session.updated
 // (plugin hook descriptors), turn.started, the model.streaming kinds, the
 // turn.completed envelope, and the bare result terminator line.
@@ -160,7 +159,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     vi.stubEnv("ZCODE_BIN", "/resolved/zcode.cjs");
     // The host may carry the GUI-inherited provider-config PAIR (running the
     // tests inside a ZCode-spawned terminal exports ZCODE_PERSONAL/_BUILTIN_
-    // PROVIDER_CONFIG_FILE to children — the same host pollution the #41
+    // PROVIDER_CONFIG_FILE to children — the same host pollution the
     // probes hit). Force it ABSENT so the binding-active tests are
     // deterministic on every host; the passthrough test stubs the pair back on.
     delete process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE;
@@ -174,7 +173,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     mockMkdtempSync.mockClear();
     mockWriteFileSync.mockClear();
     mockRmSync.mockClear();
-    // #41: default happy-path binding (refusal tests override the return).
+    // Default happy-path binding (refusal tests override the return).
     mockPrepareBinding.mockReset();
     mockPrepareBinding.mockReturnValue(bindingOkResult);
   });
@@ -278,7 +277,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     );
   });
 
-  // #41 — the per-turn model binding: the PAIRED provider-config env vars ride
+  // The per-turn model binding: the PAIRED provider-config env vars ride
   // the spawn env (personal → the temp clone, builtin → the catalog file the
   // selection was validated against), and the bound model surfaces as a meta
   // event so the log shows what the turn was pinned to.
@@ -321,7 +320,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(meta).toMatchObject({ type: "meta", key: "model", value: "GLM-5.2/high" });
   });
 
-  // #41 — fail-refuse: a broken link in the resolution chain refuses the spawn
+  // Fail-refuse: a broken link in the resolution chain refuses the spawn
   // with the actionable error instead of silently falling back to whatever the
   // CLI would pick on its own.
   it("refuses to spawn when the binding resolution fails (error event, no spawn, temp cleaned)", async () => {
@@ -349,7 +348,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(mockRmSync).toHaveBeenCalledWith(attachDir(), expect.anything());
   });
 
-  // #41 — escape hatch: a user who pre-set BOTH provider-config vars keeps
+  // Escape hatch: a user who pre-set BOTH provider-config vars keeps
   // them verbatim (zero-code reroute); the adapter neither overrides them nor
   // prepares its own binding.
   it("passes a user-set env PAIR through untouched and skips its own binding", async () => {
@@ -404,7 +403,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(deltas.map((d) => (d as { text: string }).text)).toEqual(["PRO", "BE", "_OK"]);
     // Noise envelope lines (session.updated hook frames …) and turn.started
     // produce NOTHING — dropped, not forwarded as raw / error events. The
-    // meta events are exactly: the #41 bound-model line after start, then
+    // meta events are exactly: the bound-model line after start, then
     // turn.completed's usage (snake_case) + duration_ms + resultType, then
     // the result terminator's sessionId. usage appears EXACTLY once — the
     // terminator's duplicate cumulative numbers are never re-emitted.
@@ -502,7 +501,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
 
     const events = await eventsPromise;
     const errors = events.filter((e) => e.type === "error");
-    // The stream's own turn.failed error comes first; #37 then maps the
+    // The stream's own turn.failed error comes first; the exit handling then maps the
     // non-zero exit to a second error right before done.
     expect(errors[0]).toEqual({ type: "error", message: "Select a model before continuing" });
     expect(errors[1]).toMatchObject({
@@ -606,9 +605,9 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
   });
 
-  // ─── #37 failure & teardown hardening ───────────────────────────────
+  // ─── Failure & teardown hardening ────────────────────────────────────
 
-  it("(#37) errors and tears the turn down after 180s of zero parsed events", async () => {
+  it("errors and tears the turn down after 180s of zero parsed events", async () => {
     vi.useFakeTimers();
     const { child, stdout } = makeFakeChild();
     const killSpy = vi.fn();
@@ -642,7 +641,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("(#37) resets the silence clock on every parsed event", async () => {
+  it("resets the silence clock on every parsed event", async () => {
     vi.useFakeTimers();
     const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
@@ -677,7 +676,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("(#37) does not arm the watchdog for non-zcode agents", async () => {
+  it("does not arm the watchdog for non-zcode agents", async () => {
     vi.useFakeTimers();
     const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
@@ -705,7 +704,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(events.some((e) => e.type === "done")).toBe(true);
   });
 
-  it("(#37) never arms the watchdog before the spawn (binding-refusal window)", async () => {
+  it("never arms the watchdog before the spawn (binding-refusal window)", async () => {
     vi.useFakeTimers();
     mockPrepareBinding.mockReturnValue({ ok: false, message: "no model plan found" });
     const { child } = makeFakeChild();
@@ -726,7 +725,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("(#37) maps a non-zero exit to an error BEFORE done, carrying the stderr essence", async () => {
+  it("maps a non-zero exit to an error BEFORE done, carrying the stderr essence", async () => {
     const { child, stdout, stderr } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
@@ -755,7 +754,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect((events[idxDone] as { code: number }).code).toBe(3);
   });
 
-  it("(#37) caps the stderr essence carried by the exit error", async () => {
+  it("caps the stderr essence carried by the exit error", async () => {
     const { child, stdout, stderr } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
@@ -780,7 +779,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(message).not.toContain("HEAD_MARKER");
   });
 
-  it("(#37) keeps the exit-0 close shape — no exit error", async () => {
+  it("keeps the exit-0 close shape — no exit error", async () => {
     const { child, stdout } = makeFakeChild();
     mockSpawn.mockReturnValue(child);
 
@@ -802,7 +801,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(events.some((e) => e.type === "done")).toBe(true);
   });
 
-  it("(#37) clears the watchdog on abort — nothing fires after the cancel", async () => {
+  it("clears the watchdog on abort — nothing fires after the cancel", async () => {
     vi.useFakeTimers();
     const { child } = makeFakeChild();
     const killSpy = vi.fn();
@@ -835,7 +834,7 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
   });
 });
 
-describe("invokeAgent — Linux AppImage self-mount (ADR-0007, CLI one-shot form)", () => {
+describe("invokeAgent — Linux AppImage self-mount (CLI one-shot form)", () => {
   const mountCjs = (mp: string) => `${mp}/resources/glm/zcode.cjs`;
   const REAL_PLATFORM = process.platform;
   const flushMicrotasks = async (iterations = 200) => {
@@ -1027,7 +1026,7 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007, CLI one-shot form
     expect(mountKillSpy).toHaveBeenCalled();
   });
 
-  // (6) Mount setup has a bounded ~5s timeout (spec AC). A mount that never
+  // (6) Mount setup has a bounded ~5s timeout . A mount that never
   // prints a point fires the timeout, emits a clear error, and cleans up.
   it("fires a clear error after the 5s mount timeout and cleans up the mount child", async () => {
     vi.useFakeTimers();
@@ -1094,14 +1093,14 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007, CLI one-shot form
     expect(mountKillSpy).toHaveBeenCalled();
   });
 
-  // T4 (#30 / ADR-0010 decision 1): resolveZcodeBin() honours a ZCODE_BIN that
+  // resolveZcodeBin() honours a ZCODE_BIN that
   // points directly at the zcode.cjs bundle (the detect tests set
   // ZCODE_BIN=<…>.cjs and assert available=true). For a `.cjs` the AppImage
   // self-mount would spawn `<.cjs> --appimage-mount` and fail — a JS bundle is
   // not an executable AppImage. So on Linux the `.cjs` is used directly:
   // exactly ONE spawn (the CLI child), argv carries the override in argv[0],
   // and no spawn argv contains `--appimage-mount`.
-  it("(T4) uses a ZCODE_BIN .cjs override directly on Linux — no AppImage mount (#30)", async () => {
+  it("uses a ZCODE_BIN .cjs override directly on Linux — no AppImage mount", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     vi.stubEnv("ZCODE_BIN", "/opt/zcode/override.cjs");
     existsSyncDelegate.mockImplementation((p: string) =>
@@ -1146,8 +1145,9 @@ describe("invokeAgent — Linux AppImage self-mount (ADR-0007, CLI one-shot form
 });
 
 
-// Regression guards for the argv branch — keep parity with the pre-T6 behavior
-// so the argv-attach routing doesn't disturb existing adapters.
+// Regression guards for the argv branch — keep parity with the behavior from
+// before the argv-attach routing landed, so it doesn't disturb existing
+// adapters.
 describe("invokeAgent — argv branch (regression)", () => {
   // Isolate from the zcode describes above: those blocks legitimately call
   // spawn and its beforeEach reset is scoped to its own tests. Reset the mock
@@ -1156,11 +1156,11 @@ describe("invokeAgent — argv branch (regression)", () => {
     mockSpawn.mockReset();
   });
 
-  // #17: per-element quoting applies only to zcode's shell-fallback corner. The
+  // Per-element quoting applies only to zcode's shell-fallback corner. The
   // shared argv spawn (every argv / argv-message agent — deepseek-tui,
   // openclaw) must pass argv verbatim, matching the `main` baseline. This pins
   // that guarantee on a win32-mocked host: no argv element gains quotes.
-  it("argv-protocol agent (deepseek-tui) spawns with bare argv elements on win32 — no per-element quoting (#17)", async () => {
+  it("argv-protocol agent (deepseek-tui) spawns with bare argv elements on win32 — no per-element quoting", async () => {
     // Force win32 so the shared branch takes the useShell path. Restore in
     // finally so a mid-assertion throw can't poison sibling tests.
     const originalPlatform = process.platform;

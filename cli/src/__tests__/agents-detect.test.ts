@@ -4,11 +4,11 @@ import { join, posix } from "node:path";
 
 const { existsSyncMock, readFileSyncMock, bindingReadyState, bindingChips, bindingDefault } = vi.hoisted(() => ({
   existsSyncMock: vi.fn((_path?: string) => false),
-  // ADR-0007: discoverZcodeAppImage reads the XDG `.desktop` entry. Mocked so
+  // discoverZcodeAppImage reads the XDG `.desktop` entry. Mocked so
   // the discover tests don't touch disk; the pure parser (parseZcodeDesktopExec)
   // is exercised separately with string fixtures.
   readFileSyncMock: vi.fn((_path?: string, _enc?: string) => ""),
-  // #41: the ZCode detect surface (plan picker + ready state) comes from
+  // The ZCode detect surface (plan picker + ready state) comes from
   // zcode-model-binding. Mutated per test below; the module itself (plan
   // parsing, catalog resolution, level tables) is tested in the protocol
   // package.
@@ -28,7 +28,7 @@ const { existsSyncMock, readFileSyncMock, bindingReadyState, bindingChips, bindi
     { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
     { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
   ],
-  // #38: what the Default chip resolves to (mocked counterpart of
+  // What the Default chip resolves to (mocked counterpart of
   // readZcodePlanDefaultChoice; `.choice = null` keeps the generic label).
   bindingDefault: {
     choice: { modelId: "GLM-5.2", reasoningLevel: "max" } as null | {
@@ -43,10 +43,10 @@ vi.mock("node:fs", async () => {
   return { ...actual, existsSync: existsSyncMock, readFileSync: readFileSyncMock };
 });
 
-// #41: detect reads the plan picker + ready state via the protocol package's
+// Detect reads the plan picker + ready state via the protocol package's
 // binding module. Mock ONLY the two IO readers; everything else stays the
 // real implementation so future exports keep working under this mock (the
-// T3/#29 unmocked-export lesson).
+// unmocked-export lesson).
 vi.mock("../zcode-model-binding.js", async () => {
   const actual = await vi.importActual<
     typeof import("../zcode-model-binding.js")
@@ -75,7 +75,7 @@ beforeEach(() => {
   existsSyncMock.mockReturnValue(false);
   readFileSyncMock.mockReset();
   readFileSyncMock.mockReturnValue("");
-  // Reset the #41 binding mock to the ready-plan fixture (tests mutate it).
+  // Reset the binding mock to the ready-plan fixture (tests mutate it).
   bindingReadyState.ready = true;
   bindingReadyState.reason = null;
   bindingReadyState.plan = {
@@ -415,7 +415,7 @@ describe("detectAgents", () => {
     });
   });
 
-  describe("type-only extension surface (T2)", () => {
+  describe("type-only extension surface", () => {
     it("AgentProtocol accepts \"argv-attach\"", () => {
       // Compile-time proof: if "argv-attach" is missing from the union this
       // assignment fails typecheck. The runtime echo keeps the test meaningful.
@@ -444,7 +444,7 @@ describe("detectAgents", () => {
       // binArgs stays optional so existing AgentDef literals keep typechecking
       // unchanged. Check the whole array, not a sample, so a future entry that
       // accidentally sets a required-looking binArgs is caught here. ZCode
-      // (T7) is the one intentional exception — its node-script spawn needs it.
+      // is the one intentional exception — its node-script spawn needs it.
       for (const def of AGENTS) {
         if (def.id === "zcode") continue;
         expect(def.binArgs).toBeUndefined();
@@ -472,9 +472,9 @@ describe("detectAgents", () => {
     });
   });
 
-  // T3: ZCode install discovery. Only the discovery function is under test;
-  // ZCode is NOT yet registered in AGENTS (registration lands in T7). Cases
-  // follow the same existsSync-mock pattern as the detectAgents tests above.
+  // ZCode install discovery. Only the discovery function is under test;
+  // registration in AGENTS is covered by the detectAgents tests above. Cases
+  // follow the same existsSync-mock pattern.
   describe("resolveZcodeBin", () => {
     it("ZCODE_BIN absolute path that exists wins over all defaults (win32)", () => {
       vi.stubEnv("ZCODE_BIN", "C:\\custom\\zcode.cjs");
@@ -546,11 +546,11 @@ describe("detectAgents", () => {
       );
     });
 
-    // ADR-0007: on Linux the canonical AppImage guess is NO LONGER probed —
+    // On Linux the canonical AppImage guess is NO LONGER probed —
     // discovery goes through the .desktop entry (resolveZcodeBin step 3 calls
     // discoverZcodeAppImage). Without a .desktop, resolveZcodeBin returns null
     // (no silent fallback to ~/Applications/ZCode.AppImage). The positive case
-    // (.desktop present → AppImage found) is covered in the ADR-0007 block below.
+    // (.desktop present → AppImage found) is covered in the AppImage block below.
     it("Linux: returns null without a .desktop entry (no canonical-path guess)", () => {
       stubPlatform("linux");
       existsSyncMock.mockReturnValue(false);
@@ -588,7 +588,7 @@ describe("detectAgents", () => {
     });
   });
 
-  // T12: resolve the node binary that drives `node <zcode.cjs> -p …` for
+  // Resolve the node binary that drives `node <zcode.cjs> -p …` for
   // an EXTERNAL caller. html-anything is an external process; on a clean
   // Windows host `where node` finds nothing (only ZCode.exe exists). The
   // resolveZcodeBin() discovery above locates the .cjs bundle — this layer
@@ -599,7 +599,7 @@ describe("detectAgents", () => {
   // `ZCode.exe <zcode.cjs> …` with ELECTRON_RUN_AS_NODE=1 booted and
   // answered JSON-RPC on this very host (no separate node.exe ships in the
   // install tree).
-  describe("resolveZcodeNodeBin (T12)", () => {
+  describe("resolveZcodeNodeBin", () => {
     it("ZCODE_NODE_BIN absolute path that exists wins over all defaults", () => {
       vi.stubEnv("ZCODE_NODE_BIN", "C:\\custom\\node.exe");
       stubPlatform("win32");
@@ -675,14 +675,14 @@ describe("detectAgents", () => {
       expect(resolveZcodeNodeBin()).toBe(expected);
     });
 
-    // T15 (#18 / ADR-0005 decision 3): the Electron-exe fallback is the
+    // The Electron-exe fallback is the
     // TERMINAL step of the probe chain. detectAgents() reports zcode available
     // only when zcode.cjs was found ⟺ ZCode is installed ⟺ the sibling
     // Electron exe exists, so any caller reaching this code sees a hit here.
     // The return type is therefore `string` (not `string | null`); this case
     // pins that the fallback yields a non-empty path, and the type itself is
     // the compile-time proof the old null outcome is gone.
-    it("returns a non-empty string when the Electron-exe fallback exists (T15)", () => {
+    it("returns a non-empty string when the Electron-exe fallback exists", () => {
       stubPlatform("win32");
       existsSyncMock.mockImplementation(
         (p) => p === "C:\\Program Files\\ZCode\\ZCode.exe",
@@ -695,11 +695,11 @@ describe("detectAgents", () => {
     });
   });
 
-  // T7: ZCode is registered as a first-class agent. Unlike the *_BIN/PATH
+  // ZCode is registered as a first-class agent. Unlike the *_BIN/PATH
   // agents, ZCode's availability is driven by resolveZcodeBin() (its CLI is a
   // .cjs bundle, not a standalone exec found on PATH). protocol "argv-attach"
   // is implemented (generic invoke trunk), so it must NOT be marked unsupported.
-  describe("ZCode agent registration (T7)", () => {
+  describe("ZCode agent registration", () => {
     it("AGENTS contains a zcode entry with the spec fields", () => {
       const def = AGENTS.find((a) => a.id === "zcode");
       expect(def).toBeDefined();
@@ -708,7 +708,7 @@ describe("detectAgents", () => {
       expect(def!.envOverride).toBe("ZCODE_BIN");
       expect(def!.protocol).toBe("argv-attach");
       expect(def!.bin).toBe("node");
-      // ADR-0002 decision 3: binArgs carries the node-script leading argv —
+      // binArgs carries the node-script leading argv —
       // just the resolved .cjs (no subcommand anymore).
       // The <resolved-zcode-cjs> placeholder is filled at detect time from
       // resolveZcodeBin(); the literal here is the sentinel on the AgentDef.
@@ -725,7 +725,7 @@ describe("detectAgents", () => {
 
       expect(zcode.available).toBe(true);
       expect(zcode.path).toBe("/opt/zcode/zcode.cjs");
-      // T15 (#18 / ADR-0005 decision 3): resolveZcodeNodeBin() now returns
+      // resolveZcodeNodeBin() now returns
       // `string` (not `string | null`), so detectAgents() no longer coalesces
       // to the literal `node`. resolvedBin is the node driver the spawn will
       // use — a non-empty string (the resolver never returns null). We don't
@@ -741,13 +741,13 @@ describe("detectAgents", () => {
       expect(zcode.unsupported).toBeUndefined();
     });
 
-    // T12 (#12): detection reports the ACTUAL node driver when one resolves,
+    // Detection reports the ACTUAL node driver when one resolves,
     // not just the literal "node". On a clean host where only the ZCode
     // Electron exe exists, resolvedBin must point at it — so the UI can show
     // the user what will really spawn, and there is no conflicting assumption
     // (detect says "node" while invoke spawns ZCode.exe). Reconciles the
     // detection layer with the invoke layer's resolveZcodeNodeBin().
-    it("detectAgents() reports the resolved Electron exe as resolvedBin when no system node (T12)", () => {
+    it("detectAgents() reports the resolved Electron exe as resolvedBin when no system node", () => {
       vi.stubEnv("ZCODE_BIN", "/resolved/zcode.cjs");
       vi.stubEnv("ZCODE_WINDOWS_APP_INSTALL_DIR", "C:\\Program Files\\ZCode");
       stubPlatform("win32");
@@ -780,10 +780,10 @@ describe("detectAgents", () => {
       expect(zcode.unsupported).toBeUndefined();
     });
 
-    // #41: the picker lists the GUI plan's models × reasoning levels (from
+    // The picker lists the GUI plan's models × reasoning levels (from
     // setting.json + the bundled catalog via zcode-model-binding), encoded as
     // "<modelId>/<level>" ids carrying the plan providerId, with a Default
-    // entry first. #38: the Default chip LABEL names what Default resolves to
+    // entry first. The Default chip LABEL names what Default resolves to
     // right now (the resolved default model×level), so it is never a stale
     // promise.
     it("picker models are the plan's models × levels; Default chip labelled with the resolved default", () => {
@@ -807,7 +807,7 @@ describe("detectAgents", () => {
       ]);
     });
 
-    // #38: when the default choice cannot be resolved (catalog/plan table
+    // When the default choice cannot be resolved (catalog/plan table
     // empty at the label seam), the Default chip falls back to the generic
     // plan label instead of promising a model it cannot name.
     it("unresolvable default choice → generic Default (ZCode GUI plan) label", () => {
@@ -824,7 +824,7 @@ describe("detectAgents", () => {
       expect(zcode.models.length).toBe(6); // chips still listed
     });
 
-    // #41: installed ≠ ready — not logged in keeps the plan chips (the
+    // Installed ≠ ready — not logged in keeps the plan chips (the
     // selection keys still resolve) but surfaces ready:false + the reason.
     it("not-ready install: ready=false + reason surfaced, plan chips still listed", () => {
       vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
@@ -843,7 +843,7 @@ describe("detectAgents", () => {
       expect(zcode.models.length).toBe(6); // default + 3 + 2 level chips
     });
 
-    // #41: no plan resolvable (GUI never opened / no selection keys) → the
+    // No plan resolvable (GUI never opened / no selection keys) → the
     // static honest floor even though the install is available.
     it("plan unresolvable: picker falls back to the static honest floor", () => {
       vi.stubEnv("ZCODE_BIN", "/opt/zcode/zcode.cjs");
@@ -878,14 +878,14 @@ describe("detectAgents", () => {
   });
 });
 
-// ADR-0007: on Linux ZCode ships as an AppImage — a single compressed file
+// On Linux ZCode ships as an AppImage — a single compressed file
 // with zcode.cjs packed inside, unreachable without mounting. The adapter
 // discovers the AppImage via the XDG .desktop entry ZCode writes on first GUI
 // launch, NOT by guessing a version-less filename. The pure parser
 // (parseZcodeDesktopExec) carries the parsing+validation logic; the discover
 // function is a thin I/O glue over it. resolveZcodeBin / resolveZcodeNodeBin
 // wire the discovery into the existing probe chain (step 3 on Linux).
-describe("parseZcodeDesktopExec — .desktop Exec= parsing + validation (ADR-0007)", () => {
+describe("parseZcodeDesktopExec — .desktop Exec= parsing + validation", () => {
   it("extracts the AppImage path from a well-formed Exec= line", () => {
     const desktop = [
       "[Desktop Entry]",
@@ -939,7 +939,7 @@ describe("parseZcodeDesktopExec — .desktop Exec= parsing + validation (ADR-000
   });
 });
 
-describe("discoverZcodeAppImage — .desktop I/O glue (ADR-0007)", () => {
+describe("discoverZcodeAppImage — .desktop I/O glue", () => {
   const desktopPath = posix.join(
     homedir(),
     ".local",
@@ -986,11 +986,11 @@ describe("discoverZcodeAppImage — .desktop I/O glue (ADR-0007)", () => {
   });
 });
 
-// ADR-0007 decision 1: on Linux, resolveZcodeBin() step 3 discovers the
+// On Linux, resolveZcodeBin() step 3 discovers the
 // AppImage via the .desktop entry. The returned path is the AppImage binary,
 // NOT a .cjs — the .cjs lives inside the mount and is resolved post-mount in
 // the invoke layer.
-describe("resolveZcodeBin / resolveZcodeNodeBin on Linux (ADR-0007)", () => {
+describe("resolveZcodeBin / resolveZcodeNodeBin on Linux", () => {
   const desktopPath = posix.join(
     homedir(),
     ".local",
@@ -1032,14 +1032,14 @@ describe("resolveZcodeBin / resolveZcodeNodeBin on Linux (ADR-0007)", () => {
     );
   });
 
-  it("defaultZcodeCjsPaths() returns the .deb .cjs candidate on Linux (T5)", () => {
+  it("defaultZcodeCjsPaths() returns the .deb .cjs candidate on Linux", () => {
     stubPlatform("linux");
     expect(defaultZcodeCjsPaths()).toEqual([
       "/opt/ZCode/resources/glm/zcode.cjs",
     ]);
   });
 
-  it("defaultZcodeElectronExePaths() lists the .deb driver before the AppImage on Linux (T5)", () => {
+  it("defaultZcodeElectronExePaths() lists the .deb driver before the AppImage on Linux", () => {
     stubPlatform("linux");
     expect(defaultZcodeElectronExePaths()).toEqual([
       "/opt/ZCode/zcode",
@@ -1061,15 +1061,15 @@ describe("resolveZcodeBin / resolveZcodeNodeBin on Linux (ADR-0007)", () => {
   });
 });
 
-// T5 (#31 / ADR-0010): the official .deb install lays a loose zcode.cjs at
+// The official .deb install lays a loose zcode.cjs at
 // /opt/ZCode/resources/glm/zcode.cjs next to the Electron driver /opt/ZCode/zcode
-// (verified against the unpacked ZCode-3.7.6-linux-x64.deb, 2026-08-13). This is
+// (verified against the unpacked ZCode-3.7.6-linux-x64.deb). This is
 // the same loose-file layout as Windows/macOS, so the .deb is probed the same
 // way: resolveZcodeBin() checks the on-disk .cjs BEFORE the AppImage (a loose
 // .cjs cleanly distinguishes a .deb from an AppImage, whose .cjs is packed in
 // the squashfs), and resolveZcodeNodeBin() probes /opt/ZCode/zcode so a .deb-
 // only host without a system node can still drive the .cjs — no mount needed.
-describe("resolveZcodeBin / resolveZcodeNodeBin Linux .deb install (T5 / ADR-0010)", () => {
+describe("resolveZcodeBin / resolveZcodeNodeBin Linux .deb install", () => {
   const desktopPath = posix.join(
     homedir(),
     ".local",
