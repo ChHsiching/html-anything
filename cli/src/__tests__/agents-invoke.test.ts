@@ -898,6 +898,47 @@ describe("invokeAgent", () => {
       expect(spawnOpts.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe("/user/builtin.json");
     });
 
+    // #41 leak fix: Z.ai server-tool display cards stream as assistant text;
+    // the filter must drop them and keep the deliverable (real leaked card
+    // text from the 2026-09-24 web run, marker split across deltas).
+    it("filters server-tool card text out of the streamed deltas", async () => {
+      const card = `**\uD83C\uDF10 Z.ai Built-in Tool: webReader**
+
+**Input:**
+\`\`\`json
+{"url":"https://x.com/SUOHA_AI/status/2100905906267418879","retain_images":false}
+\`\`\`
+*Executing on server...*
+**Output:**
+**webReader_result_summary:** [{"text": {"title": "梭哈.AI on X: …"}}]`;
+      const html = "\n\n<!DOCTYPE html>\n<html><body><h1>页面</h1></body></html>";
+      const ndjson = [
+        "读取链接中。\n",
+        card.slice(0, 33),
+        card.slice(33, 80),
+        card.slice(80, 150),
+        card.slice(150),
+        html,
+      ]
+        .map((d, i) => `{"type":"model.streaming","payload":{"kind":"text_delta","delta":${JSON.stringify(d)},"done":false},"seq":${20 + i}}`)
+        .join("\n");
+
+      const events = await driveInvoke(
+        { agent: "zcode", prompt: "hi", binOverride: "/resolved/node.exe" },
+        `${ndjson}\n`,
+        0,
+      );
+      const text = events
+        .filter((e) => e.type === "delta")
+        .map((e) => (e as { text: string }).text)
+        .join("");
+      expect(text).not.toContain("Built-in Tool");
+      expect(text).not.toContain("webReader_result_summary");
+      expect(text).toContain("读取链接中。");
+      expect(text).toContain("<!DOCTYPE html>");
+      expect(text.endsWith("</html>")).toBe(true);
+    });
+
     it("bridges model.streaming text_delta lines to {type:'delta'} and safely drops noise lines", async () => {
       const { child, stdout } = makeFakeChild();
       mockSpawn.mockReturnValue(child);

@@ -320,3 +320,60 @@ describe("parseLine zcode (argv-attach stream-json)", () => {
     ]);
   });
 });
+
+describe("parseLine zcode — server-tool card filtering (#41 leak fix)", () => {
+  const line = (delta: string, seq: number) =>
+    `{"eventId":"e${seq}","payload":{"delta":${JSON.stringify(delta)},"done":false,"kind":"text_delta"},"seq":${seq},"type":"model.streaming"}`;
+
+  // The user's real leaked card (2026-09-24 web run), split across arbitrary
+  // delta boundaries — marker split mid-way, fetched content with < inside,
+  // then the deliverable HTML resuming at <!DOCTYPE.
+  const CARD = `**\uD83C\uDF10 Z.ai Built-in Tool: webReader**
+
+**Input:**
+\`\`\`json
+{"url":"https://x.com/SUOHA_AI/status/2100905906267418879","retain_images":false}
+\`\`\`
+*Executing on server...*
+**Output:**
+**webReader_result_summary:** [{"text": {"title": "梭哈.AI on X: \"手把手教你光速用上 Jev… 我<a>昨天</a>填完问卷几个小时内就通过了审核…"}}]`;
+  const HTML = `\n\n<!DOCTYPE html>\n<html><body><h1>页面</h1></body></html>`;
+
+  it("drops the card text and keeps the deliverable (marker split across deltas)", () => {
+    const parse = makeParser("zcode");
+    const stream = `好的，我先读取链接。\n${CARD}${HTML}`;
+    // Feed in awkward chunks so the marker and "<" split across deltas.
+    const chunks = [stream.slice(0, 40), stream.slice(40, 58), stream.slice(58, 90), stream.slice(90, 130), stream.slice(130, 200), stream.slice(200, 340), stream.slice(340)];
+    const out: string[] = [];
+    chunks.forEach((c, i) => {
+      for (const part of parse(line(c, 30 + i))) {
+        if (part.kind === "delta") out.push(part.text);
+      }
+    });
+    const joined = out.join("");
+    expect(joined).not.toContain("Built-in Tool");
+    expect(joined).not.toContain("webReader_result_summary");
+    expect(joined).not.toContain("Executing on server");
+    expect(joined).toContain("好的，我先读取链接。");
+    expect(joined).toContain("<!DOCTYPE html>");
+    expect(joined.endsWith("</html>")).toBe(true);
+  });
+
+  it("consecutive cards collapse; plain text without cards passes unchanged", () => {
+    const parse = makeParser("zcode");
+    const out: string[] = [];
+    for (const part of parse(line(`纯文本段落` + CARD.slice(0, 60), 1))) {
+      if (part.kind === "delta") out.push(part.text);
+    }
+    for (const part of parse(line(CARD.slice(60) + CARD.slice(0, 30), 2))) {
+      if (part.kind === "delta") out.push(part.text);
+    }
+    for (const part of parse(line(CARD.slice(30) + `<p>正文</p>`, 3))) {
+      if (part.kind === "delta") out.push(part.text);
+    }
+    const joined = out.join("");
+    expect(joined).not.toContain("Built-in Tool");
+    expect(joined).toContain("纯文本段落");
+    expect(joined).toContain("<p>正文</p>");
+  });
+});
