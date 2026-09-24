@@ -26,7 +26,6 @@ const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockR
       },
       clonePath: "/tmp/attach/provider-config.clone.json",
       builtinCatalogPath: "/install/resources/config/provider/zcode-builtin.json",
-      dataBaseDir: "/tmp/attach/zcode-data",
     },
   };
 });

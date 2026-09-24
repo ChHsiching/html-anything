@@ -481,6 +481,7 @@ describe("prepareZcodeModelBinding", () => {
   it("explicit pick: writes the exact selection into a temp clone; the real config file is UNTOUCHED (zero-write snapshot)", () => {
     const f = fixtureTree();
     const before = readFileSync(f.personalPath, "utf8");
+    const credsFixture = JSON.parse(readFileSync(f.credentialsPath, "utf8")) as Record<string, string>;
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
       model: "GLM-5.2/high",
@@ -513,21 +514,51 @@ describe("prepareZcodeModelBinding", () => {
     // ZERO-WRITE contract: the user's real file is byte-identical.
     expect(readFileSync(f.personalPath, "utf8")).toBe(before);
 
-    // Identity bridge (#41 fix): a temp ZCODE_DATA_BASE_DIR credentials clone
-    // carries a PLAINTEXT identity key derived from the GUI's api-key key name
-    // (the headless registry materializes account providers only with it).
-    const credsBefore = readFileSync(f.credentialsPath, "utf8");
-    expect(result.dataBaseDir).toBe(join(f.attachDir, "zcode-data"));
-    const bridged = JSON.parse(
-      readFileSync(join(result.dataBaseDir, ".zcode", "v2", "credentials.json"), "utf8"),
-    ) as Record<string, string>;
-    expect(bridged["account-provider:account:bigmodel-individual-coding-plan:identity"]).toBe(
-      "41641738601171874",
+    // Identity bridge (#41 fix): the REAL credential store gains EXACTLY the
+    // one identity key (plaintext, derived from the GUI's own api-key key
+    // name — the headless registry materializes account providers only with
+    // it); every pre-existing key and value is untouched, and a second
+    // preparation with the key already present writes NOTHING (idempotent).
+    const credsAfter = JSON.parse(readFileSync(f.credentialsPath, "utf8")) as Record<string, string>;
+    expect(credsAfter).toEqual({
+      ...credsFixture,
+      "account-provider:account:bigmodel-individual-coding-plan:identity": "41641738601171874",
+    });
+    // Idempotent: re-prepare → no further change (byte-stable).
+    const second = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: "GLM-5.2/high",
+      attachDir: f.attachDir,
+      settingPath: f.settingPath,
+      personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
+      cacheRoot: join(dir, "no-cache"),
+    });
+    expect(second.ok).toBe(true);
+    expect(readFileSync(f.credentialsPath, "utf8")).toBe(
+      JSON.stringify(credsAfter, null, 2),
     );
-    // The clone keeps the real encrypted values verbatim.
-    expect(bridged["oauth:bigmodel:access_token"]).toBe("enc:v1:fake");
-    // ZERO-WRITE on credentials too.
-    expect(readFileSync(f.credentialsPath, "utf8")).toBe(credsBefore);
+  });
+
+  it("identity bridge skips writing when the key already exists (zcode-login users)", () => {
+    const f = fixtureTree();
+    writeFileSync(f.credentialsPath, JSON.stringify({
+      "oauth:bigmodel:access_token": "enc:v1:fake",
+      "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:41641738601171874:api-key": "enc:v1:fake",
+      "account-provider:account:bigmodel-individual-coding-plan:identity": "41641738601171874",
+    }));
+    const before = readFileSync(f.credentialsPath, "utf8");
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: "GLM-5.2/high",
+      attachDir: f.attachDir,
+      settingPath: f.settingPath,
+      personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
+      cacheRoot: join(dir, "no-cache"),
+    });
+    expect(result.ok).toBe(true);
+    expect(readFileSync(f.credentialsPath, "utf8")).toBe(before);
   });
 
   it("no coding-plan api-key credential → credentials-missing refusal (identity bridge has no raw material)", () => {

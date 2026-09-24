@@ -39,11 +39,16 @@
  * (only `zcode login` does; the GUI's desktop host pushes its account snapshot
  * through a different channel). Without it the plan provider is absent from
  * the registry, the selection is silently discarded, and the turn reroutes to
- * the first personal provider. The bridge: clone the credentials store into a
- * temp ZCODE_DATA_BASE_DIR and add a plaintext identity key derived from the
- * GUI's own api-key key name (decrypt() passes non-`enc:v1:` values through).
- * See prepareZcodeModelBinding for the trade-off note (sessions land in the
- * temp dir).
+ * the first personal provider. The bridge: ensure that ONE key exists in the
+ * REAL credential store — its value is the account id already embedded in the
+ * GUI's own api-key key name, plaintext (decrypt() passes non-`enc:v1:` values
+ * through), written as an ATOMIC ADD-ONLY append (no existing key is touched,
+ * re-checked every turn, idempotent). A user who ran `zcode login` already has
+ * the key and no write ever happens. This is the one deliberate exception to
+ * the zero-user-write posture — chosen over redirecting ZCODE_DATA_BASE_DIR to
+ * a temp clone (tried, e9df98f: correct binding but the whole data dir —
+ * sessions, logs, plugin caches — moves and dies with the turn, GUI-invisible
+ * and ~10x slower); a product cannot ask every user to run `zcode login`.
  *
  * Read surface (all private ZCode formats — spec risk register):
  *   - `~/.zcode/v2/setting.json` — current keys `providerFamilyDomain` +
@@ -80,6 +85,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -643,11 +649,6 @@ export type ZcodeBindingResult =
     clonePath: string;
     /** The catalog file validated against == the paired builtin env value. */
     builtinCatalogPath: string;
-    /**
-     * The temp ZCODE_DATA_BASE_DIR root holding the bridged credentials
-     * clone. Passed as the third env value by {@link zcodeBindingEnv}.
-     */
-    dataBaseDir: string;
   }
   | {
     ok: false;
@@ -693,12 +694,11 @@ function findCodingPlanApiKeyEntry(
  * key — a key the GUI never writes (only `zcode login` does) — and a provider
  * without it is absent from the registry, which makes our
  * defaultModelSelection unselectable and silently reroutes the turn to the
- * first personal provider. The bridge derives the identity from the GUI's own
- * api-key key name and delivers it via ZCODE_DATA_BASE_DIR pointing at a
- * temp dir (decrypt() passes non-`enc:v1:` plaintext through verbatim).
- * Trade-off: redirecting the data base dir lands the turn's session/log in
- * the temp dir too — the "session stays visible in the ZCode GUI" acceptance
- * is traded away for the zero-user-write guarantee.
+ * first personal provider. The bridge ensures that key exists in the REAL
+ * credential store (atomic add-only append of the one key, re-checked every
+ * turn; users who ran `zcode login` already have it and nothing is written).
+ * Everything else in the store is untouched, so the turn keeps using the
+ * real data dir — sessions stay visible in the ZCode GUI.
  *
  * `model` semantics: undefined / "default" binds the plan default — the GUI's
  * own `defaultModelSelection` when it targets the plan provider validly, else
@@ -776,23 +776,27 @@ export function prepareZcodeModelBinding(opts: {
   const selection = resolveSelection(opts.model, plan, planModels, personal);
   if (!selection.ok) return selection;
 
-  // Credentials clone + plaintext identity bridge, delivered via a temp
-  // ZCODE_DATA_BASE_DIR root inside the attach dir.
-  const dataBaseDir = join(opts.attachDir, "zcode-data");
-  const credentialsCloneDir = join(dataBaseDir, ".zcode", "v2");
-  const bridged = { ...credentialsRecord };
-  bridged[`account-provider:${plan.providerId}:identity`] = apiKeyEntry.identity;
-  try {
-    mkdirSync(credentialsCloneDir, { recursive: true });
-    writeFileSync(join(credentialsCloneDir, "credentials.json"), JSON.stringify(bridged, null, 2), "utf8");
-  } catch (err) {
-    return {
-      ok: false,
-      code: "credentials-missing",
-      message: `ZCode: failed to write the temp credentials clone: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    };
+  // Identity bridge on the REAL credential store: the headless registry needs
+  // `account-provider:<providerId>:identity`; the GUI never writes it. Ensure
+  // it exists as an ATOMIC ADD-ONLY append (tmp file + rename; no existing
+  // key is touched; idempotent — already present means no write at all).
+  const identityKey = `account-provider:${plan.providerId}:identity`;
+  if (credentialsRecord[identityKey] !== apiKeyEntry.identity) {
+    const credentialsPath = opts.credentialsPath ?? defaultZcodeCredentialsPath();
+    try {
+      const bridged = { ...credentialsRecord, [identityKey]: apiKeyEntry.identity };
+      const tmpPath = `${credentialsPath}.html-anything-tmp`;
+      writeFileSync(tmpPath, JSON.stringify(bridged, null, 2), "utf8");
+      renameSync(tmpPath, credentialsPath);
+    } catch (err) {
+      return {
+        ok: false,
+        code: "credentials-missing",
+        message: `ZCode: failed to add the Coding Plan identity credential to ${credentialsPath}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      };
+    }
   }
 
   // Deep-clone via JSON round-trip: the source is freshly-parsed JSON anyway.
@@ -823,7 +827,6 @@ export function prepareZcodeModelBinding(opts: {
     selection: selection.selection,
     clonePath,
     builtinCatalogPath: catalog.path,
-    dataBaseDir,
   };
 }
 
@@ -909,18 +912,12 @@ export function zcodeProviderEnvPairSet(env: Readonly<NodeJS.ProcessEnv>): boole
 }
 
 /** Convenience: the paired env values for a prepared binding. */
-/** Env var redirecting the CLI's data base dir (holds the bridged credentials). */
-export const ZCODE_DATA_BASE_DIR_ENV = "ZCODE_DATA_BASE_DIR";
-
-/** Convenience: the THREE env values for a prepared binding — the paired
- * provider-config files plus the temp data-base-dir carrying the identity
- * bridge. */
+/** Convenience: the paired env values for a prepared binding. */
 export function zcodeBindingEnv(
   result: Extract<ZcodeBindingResult, { ok: true }>,
 ): Record<string, string> {
   return {
     [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: result.clonePath,
     [ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]: result.builtinCatalogPath,
-    [ZCODE_DATA_BASE_DIR_ENV]: result.dataBaseDir,
   };
 }

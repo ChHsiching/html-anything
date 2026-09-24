@@ -33,7 +33,6 @@ const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockR
       },
       clonePath: "/tmp/attach/provider-config.clone.json",
       builtinCatalogPath: "/install/resources/config/provider/zcode-builtin.json",
-      dataBaseDir: "/tmp/attach/zcode-data",
     },
   };
 });
@@ -306,7 +305,6 @@ describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
     expect(spawnOpts.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe(
       bindingOkResult.builtinCatalogPath,
     );
-    expect(spawnOpts.env.ZCODE_DATA_BASE_DIR).toBe(bindingOkResult.dataBaseDir);
     expect(spawnOpts.env.ELECTRON_RUN_AS_NODE).toBe("1");
     // Bound model meta right after start (ZCode's own stream has no model meta).
     const meta = events.find((e) => e.type === "meta" && e.key === "model");

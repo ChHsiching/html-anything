@@ -318,13 +318,12 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         // which can route the turn to a provider the user never chose. Every
         // turn therefore writes its model selection into a TEMP CLONE of the
         // user's provider config (real file never touched) and hands the
-        // child the env trio: the PAIRED ZCODE_*_PROVIDER_CONFIG_FILE vars
-        // (hard-required by the CLI; "读哪份传哪份" — the builtin var points
-        // at the very catalog file the selection was validated against) plus
-        // ZCODE_DATA_BASE_DIR on a temp dir whose credentials clone carries
-        // the identity key the headless registry needs (GUI never writes it;
-        // without it the plan provider is absent and the turn silently
-        // reroutes — live-proven 2026-09-24, see zcode-model-binding.ts). A user
+        // child the PAIRED ZCODE_*_PROVIDER_CONFIG_FILE vars (hard-required
+        // by the CLI; "读哪份传哪份" — the builtin var points at the very
+        // catalog file the selection was validated against). The prepare call
+        // also ensures the ONE identity credential the headless registry
+        // needs exists in the real store (atomic add-only append; see
+        // zcode-model-binding.ts — live-proven 2026-09-24). A user
         // who pre-set the pair keeps it untouched (zero-code reroute); any
         // broken link in the resolution chain refuses the spawn with an
         // actionable error — never a silent reroute. See
