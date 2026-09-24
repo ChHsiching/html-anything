@@ -1,4 +1,4 @@
-// #41 — the zcode failure-surface gate, extracted from use-convert.ts so the
+// The zcode failure gate, extracted from use-convert.ts so the
 // consumer-layer contract (error event / non-zero exit → red error state,
 // zcode-only) is unit-testable without driving the full fetch/SSE loop.
 import { describe, expect, it } from "vitest";

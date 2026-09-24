@@ -36,26 +36,10 @@ type BinResolution =
  *   3. PATH scan over `def.bin` then `def.fallbackBins`
  *
  * If a `binOverride` is set but doesn't resolve, return `override-missing`
- * (do not silently fall through) — the user picked an explicit path and
- * deserves to see the typo / wrong path instead of mysteriously running a
+ * (do not silently fall through): the user picked an explicit path and
+ * deserves to see the typo / wrong path rather than mysteriously running a
  * different binary.
  */
-/**
- * Quote a single argv element for cmd.exe when `spawn(..., { shell: true })` is
- * used on Windows. cmd.exe splits the argv array on whitespace, so an element
- * containing a space — notably ZCode's resolved `C:\Program
- * Files\ZCode\resources\glm\zcode.cjs` — must be double-quoted. Already-quoted
- * elements are left alone; empty elements become `""`.
- *
- * Only used on zcode's shell fallback path (a `.cmd`/`.bat` node shim): the
- * normal zcode resolution yields an absolute `.exe`, which spawns directly
- * with no shell and verbatim argv.
- */
-function quoteWindowsArg(arg: string): string {
-  if (arg.length > 0 && arg.startsWith('"') && arg.endsWith('"')) return arg;
-  return `"${arg}"`;
-}
-
 function resolveBinForAgent(
   def: (typeof AGENTS)[number],
   binOverride: string | undefined,
@@ -86,12 +70,28 @@ function resolveBinForAgent(
   return { kind: "not-found" };
 }
 
+/**
+ * Quote a single argv element for cmd.exe when `spawn(..., { shell: true })` is
+ * used on Windows. cmd.exe splits the argv array on whitespace, so an element
+ * containing a space (notably ZCode's resolved `C:\Program
+ * Files\ZCode\resources\glm\zcode.cjs`) must be double-quoted. Already-quoted
+ * elements are left alone; empty elements become `""`.
+ *
+ * Only used on zcode's shell fallback path (a `.cmd`/`.bat` node shim): the
+ * normal zcode resolution yields an absolute `.exe`, which spawns directly
+ * with no shell and verbatim argv.
+ */
+function quoteWindowsArg(arg: string): string {
+  if (arg.length > 0 && arg.startsWith('"') && arg.endsWith('"')) return arg;
+  return `"${arg}"`;
+}
+
 export type InvokeEvent =
   | { type: "start"; bin: string; argv: string[]; promptBytes: number }
   | { type: "delta"; text: string }
   /**
    * Canonical HTML rescued from a file-write tool call. The client REPLACES
-   * the task's accumulated html with this payload (not appends) — see
+   * the task's accumulated html with this payload (not appends); see
    * [[rescueHtmlFromToolUse]] in argv.ts for why this exists.
    */
   | { type: "html"; text: string }
@@ -104,7 +104,7 @@ export type InvokeEvent =
 /**
  * Silence watchdog (zcode only): a healthy stream-json turn produces
  * parsed events continuously (deltas, thinking fragments, tool status), so
- * 180s with ZERO parsed events means the model or CLI hung and the turn
+ * 180s with zero parsed events means the model or CLI hung and the turn
  * would hang forever with no teardown. Any stdout line that parses to at
  * least one event resets the clock; when it fires the turn errors out, the
  * child is killed, and the stream closes. Sibling agents keep their
@@ -114,8 +114,8 @@ const ZCODE_SILENCE_TIMEOUT_MS = 180_000;
 
 /**
  * Cap on the stderr tail kept for the non-zero-exit error message.
- * The FULL stderr keeps streaming to the log as `stderr` events; this buffer
- * only feeds the one-line exit error with its most recent essence.
+ * The full stderr keeps streaming to the log as `stderr` events; this buffer
+ * only feeds the one-line exit error with its most recent content.
  */
 const STDERR_TAIL_CAP = 2_000;
 /** How much of that tail the exit-error message actually quotes. */
@@ -127,23 +127,15 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     return errorStream(`unknown agent: ${opts.agent}`);
   }
 
-  // Re-keyed to the CLI one-shot form: argv-attach agents (ZCode)
-  // spawn `node <zcode.cjs> -p …`, and html-anything is an EXTERNAL process —
-  // on a clean Windows host `where node` finds nothing. The generic
-  // resolveBinForAgent() path treats `def.bin = "node"` as a PATH lookup and
-  // treats ZCODE_BIN (def.envOverride) as the bin override, but ZCODE_BIN is
-  // the .cjs override, NOT a node bin. So argv-attach agents get their OWN bin
-  // resolution: binOverride (explicit node path) wins; otherwise
-  // resolveZcodeNodeBin() discovers node-or-Electron-exe (see its doc comment
-  // for the live-proven strategy). Execution then continues down the GENERIC
-  // trunk below — ZCode has no dedicated protocol branch anymore.
-  //
-  // resolveZcodeNodeBin() returns `string`
-  // (not `string | null`) — the Electron-exe fallback is terminal and
-  // guaranteed-present whenever detect passed (zcode.cjs found ⟺ ZCode
-  // installed ⟺ exe exists). Only the binOverride-missing error remains (a
-  // user-supplied path that does not resolve is a real, reachable typo the
-  // user deserves to see).
+  // argv-attach agents (ZCode) spawn `node <zcode.cjs> -p …`, and
+  // html-anything is an external process: on a clean Windows host
+  // `where node` finds nothing. ZCODE_BIN (def.envOverride) is the `.cjs`
+  // override, not a node bin, so these agents resolve their bin separately:
+  // binOverride (explicit node path) wins, else resolveZcodeNodeBin() (never
+  // null because its Electron-exe fallback is present whenever detect
+  // passed). Only the binOverride-missing error remains. Execution then
+  // continues down the generic trunk below; ZCode has no dedicated protocol
+  // branch.
   let bin: string;
   if (def.protocol === "argv-attach") {
     if (opts.binOverride && opts.binOverride.trim()) {
@@ -187,8 +179,8 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   const promptViaMessageFlag = def.protocol === "argv-message";
   const promptViaAttach = def.protocol === "argv-attach";
 
-  // Lifted above the ReadableStream so `cancel` — a sibling callback of
-  // `start` that cannot reach its locals — can tear the argv-attach turn's
+  // Lifted above the ReadableStream so `cancel` (a sibling callback of
+  // `start` that cannot reach its locals) can tear the argv-attach turn's
   // resources down without waiting on `start`:
   //   - mountChild: on Linux the AppImage mount child stays alive holding the
   //     FUSE mount for the duration of the turn (null on Windows/macOS).
@@ -196,7 +188,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
   let mountChild: ChildProcessWithoutNullStreams | null = null;
   let attachTmpDir: string | null = null;
   // The zcode silence-watchdog handle, lifted for the same reason as
-  // cleanupArgvAttach — `cancel`, a sibling of `start`, must be able to clear
+  // cleanupArgvAttach: `cancel`, a sibling of `start`, must be able to clear
   // it without waiting for `start` to run.
   let silenceTimer: ReturnType<typeof setTimeout> | null = null;
   const clearSilenceTimer = () => {
@@ -240,8 +232,8 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         } catch {}
       };
 
-      // argv-attach (ZCode): resolve the .cjs argv[1] BEFORE the final argv is
-      // assembled — on Linux that path is only known after the AppImage
+      // argv-attach (ZCode): resolve the .cjs argv[1] before the final argv is
+      // assembled; on Linux that path is only known after the AppImage
       // self-mounts. Reuses resolveZcodeBin() and the
       // mount helper unchanged; a ZCODE_BIN pointing at a `.cjs` is used
       // directly with no mount.
@@ -320,11 +312,11 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       if (promptViaMessageFlag) argv = [...argv, "--message", opts.prompt];
       // `protocol: "argv-attach"` (zcode today): the full prompt (shared
       // directives + template + user content, 20-30KB+) is far past command-
-      // line length limits, so it travels as a temp-file attachment — the
-      // `.md` enters the model context whole (live-proven). `-p` (buildArgv)
-      // already carries the fixed short guide. The mkdtemp dir is removed on
+      // line length limits, so it travels as a temp-file attachment. The
+      // `.md` enters the model context whole (verified). `-p` (buildArgv)
+      // already holds the fixed short guide. The mkdtemp dir is removed on
       // every exit path via cleanupArgvAttach (close / error / abort /
-      // cancel) — it also holds the per-turn provider-config clone below, so
+      // cancel); it also holds the per-turn provider-config clone below, so
       // the binding is cleaned up with the prompt.
       let boundModelMeta: string | null = null;
       if (promptViaAttach) {
@@ -342,22 +334,10 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         }
         argv = [...argv, "--attach", path.join(attachTmpDir, "prompt.md")];
 
-        // Deterministic per-turn model binding. ZCode's CLI has no
-        // --model flag and SILENTLY falls back to the first visible registry
-        // provider (+ max reasoning) when a config default is absent/invalid,
-        // which can route the turn to a provider the user never chose. Every
-        // turn therefore writes its model selection into a TEMP CLONE of the
-        // user's provider config (real file never touched) and hands the
-        // child the PAIRED ZCODE_*_PROVIDER_CONFIG_FILE vars (hard-required
-        // by the CLI; the builtin var points at the very
-        // catalog file the selection was validated against). The prepare call
-        // also ensures the ONE identity credential the headless registry
-        // needs exists in the real store (atomic add-only append; see
-        // zcode-model-binding.ts — live-verified). A user
-        // who pre-set the pair keeps it untouched (zero-code reroute); any
-        // broken link in the resolution chain refuses the spawn with an
-        // actionable error — never a silent reroute. See
-        // zcode-model-binding.ts for the live-proven mechanism.
+        // Per-turn model binding (ZCode has no --model flag): clone + paired
+        // env vars + the identity-bridge credential; any broken link refuses
+        // the spawn. See zcode-model-binding.ts. A user who pre-set the env
+        // pair keeps it untouched (zero-code reroute).
         if (!zcodeProviderEnvPairSet(process.env)) {
           const binding = prepareZcodeModelBinding({
             cjsPath: cjsPath!,
@@ -376,7 +356,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       }
 
       // node-script CLIs (ZCode's zcode.cjs) run as `node <cjs> -p …`;
-      // binArgs carries the leading argv the bin needs, with the
+      // binArgs holds the leading argv the bin needs, with the
       // `<resolved-zcode-cjs>` sentinel filled from the path resolved above
       // (the mounted path on Linux). Absent for every existing adapter, so
       // their spawn is unchanged.
@@ -391,20 +371,20 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         // shell. Without this, every agent invocation fails with
         // EINVAL / "spawn 无效的参数". macOS/Linux use direct exec.
         // Safety: prompt content is delivered via stdin, `--message <text>`
-        // (argv-message), or a temp-file `--attach` path (argv-attach) —
+        // (argv-message), or a temp-file `--attach` path (argv-attach), and
         // never interpolated into a shell command, so this does not introduce
         // a shell-injection vector.
         //
-        // EXCEPTION — an ABSOLUTE `.exe` (ZCode's `ZCode.exe` node driver, or
-        // a real node.exe) spawns DIRECTLY: no cmd.exe round-trip, so spaced
-        // install paths (`C:\Program Files\ZCode\ZCode.exe`) work untouched
-        // and every argv element passes verbatim — no quoting games. Only
-        // the BIN is quoted on the shell path (the `main` baseline);
-        // per-element quoting (quoteWindowsArg) applies solely to zcode's
-        // `.cmd`-shim corner, where the spaced `zcode.cjs` path must survive
-        // cmd.exe's whitespace split. (The cli mirror deliberately differs
-        // here: it never quoted the bin on its generic shell path, so it
-        // gates ALL quoting — bin included — on the zcode attach case.)
+        // Exception: an absolute `.exe` (ZCode's `ZCode.exe` node driver, or
+        // a real node.exe) spawns directly with no cmd.exe round-trip, so
+        // spaced install paths (`C:\Program Files\ZCode\ZCode.exe`) work
+        // untouched and every argv element passes verbatim, with no quoting
+        // games. Only the bin is quoted on the shell path (the `main`
+        // baseline); per-element quoting (quoteWindowsArg) applies solely to
+        // zcode's `.cmd`-shim corner, where the spaced `zcode.cjs` path must
+        // survive cmd.exe's whitespace split. (The cli mirror deliberately
+        // differs here: it never quoted the bin on its generic shell path, so
+        // it gates all quoting, bin included, on the zcode attach case.)
         const binIsAbsoluteExe =
           process.platform === "win32" &&
           /^([a-zA-Z]:[\\/]|[\\/])/.test(bin) &&
@@ -438,20 +418,20 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         promptBytes: Buffer.byteLength(opts.prompt, "utf8"),
       });
       // The bound model as resolved by the per-turn binding (ZCode's stream emits
-      // no model/session start meta of its own). Surfaced so the log panel
-      // shows which model×level the turn was pinned to.
+      // no model/session start meta of its own). Emitted so the log panel
+      // shows which model and level the turn was pinned to.
       if (boundModelMeta) {
         safeEnqueue({ type: "meta", key: "model", value: boundModelMeta });
       }
 
-      // Arm the silence watchdog only HERE — after the spawn succeeded —
-      // so the argv-assembly / Linux-mount / binding window before it can
+      // Arm the silence watchdog only here, after the spawn succeeded, so
+      // the argv-assembly / Linux-mount / binding window before it can
       // never trip the timer (that window has its own bounded failures).
       const fireSilence = () => {
         silenceTimer = null;
         safeEnqueue({
           type: "error",
-          message: `ZCode produced no stream events for ${ZCODE_SILENCE_TIMEOUT_MS / 1000}s — the turn was terminated (hung model or CLI?).`,
+          message: `ZCode produced no stream events for ${ZCODE_SILENCE_TIMEOUT_MS / 1000}s. The turn was terminated (hung model or CLI?).`,
         });
         try {
           child?.kill("SIGTERM");
@@ -474,7 +454,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       try {
         // stdin-protocol agents read the prompt from stdin; argv / argv-message
         // agents already have it on the command line; argv-attach agents carry
-        // it in the temp-file attachment — stdin stays empty for all three.
+        // it in the temp-file attachment, so stdin stays empty for all three.
         if (!promptViaArgv && !promptViaMessageFlag && !promptViaAttach) child.stdin.write(opts.prompt);
         child.stdin.end();
       } catch {}
@@ -490,8 +470,8 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
       child.stdout.on("data", (chunk: string) => {
         if (closed) return;
         stdoutBuf += chunk;
-        // OpenClaw emits one big multi-line JSON document — accumulate and
-        // parse it once on close instead of trying to parse each line.
+        // OpenClaw emits one big multi-line JSON document; accumulate and
+        // parse it once on close rather than trying to parse each line.
         if (opts.agent === "openclaw") return;
         let nl: number;
         while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
@@ -500,8 +480,8 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
           if (!line) continue;
           const parts = parse(line);
           // Any line that parsed to at least one event proves the turn
-          // is alive — reset the zcode silence watchdog (no-op for the
-          // agents that never armed one). Dropped noise lines do NOT reset:
+          // is alive, so it resets the zcode silence watchdog (no-op for the
+          // agents that never armed one). Dropped noise lines do not reset:
           // they are exactly the "silence" the watchdog exists to catch.
           if (parts.length > 0) resetSilenceTimer();
           for (const part of parts) {
@@ -601,11 +581,11 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
         // argv-attach teardown: kill the Linux mount holder and remove the
         // prompt temp dir (no-op for every other agent).
         cleanupArgvAttach();
-        // A non-zero exit is a failed turn — emit the error BEFORE done
+        // A non-zero exit is a failed turn: emit the error before done
         // so the consumer's failure gate renders the red error state (an
         // exit-0/unknown-code close keeps the historical done-only shape).
-        // Carries the stderr essence for diagnosability; the full stderr has
-        // already streamed as `stderr` log events.
+        // The message quotes the stderr tail for diagnosability; the full
+        // stderr has already streamed as `stderr` log events.
         if (opts.agent === "zcode" && code != null && code !== 0) {
           const hint = stderrTail.trim();
           safeEnqueue({
@@ -630,7 +610,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
     cancel() {
       // Stream consumer cancelled. Release the argv-attach turn's resources
       // (mount holder + prompt temp file + silence watchdog); the child
-      // itself is governed by the abort signal — unchanged generic behavior.
+      // itself is governed by the abort signal, unchanged generic behavior.
       clearSilenceTimer();
       cleanupArgvAttach();
     },
@@ -652,7 +632,7 @@ export function invokeAgent(opts: InvokeOpts): ReadableStream<InvokeEvent> {
  * Returns the mount child (killed on teardown) and the resolved mount point.
  *
  * Bounded to ~5s so a missing FUSE / corrupt AppImage / permission error
- * surfaces a clear error event instead of hanging the turn. The
+ * surfaces a clear error event rather than hanging the turn. The
  * mount child is detached from the abort signal here only to the extent of
  * the timeout; the caller wires `signal` into the surrounding teardown.
  */
@@ -688,7 +668,7 @@ async function mountZcodeAppImage(
       }
     };
     const timer = setTimeout(() => {
-      settle(new Error("ZCode AppImage mount timed out (no mount point after 5s) — is FUSE available and the AppImage executable?"));
+      settle(new Error("ZCode AppImage mount timed out (no mount point after 5s). Is FUSE available and is the AppImage executable?"));
     }, 5_000);
     const onError = (err: Error) => settle(err);
     // The mount child should stay alive holding the FUSE mount; ANY exit before
@@ -697,7 +677,7 @@ async function mountZcodeAppImage(
     const onClose = () =>
       settle(new Error("ZCode AppImage mount exited before producing a mount point (FUSE missing, AppImage corrupt, or permission denied?)"));
     // Honor an abort during the mount window (up to 5s). The outer onAbort is
-    // only registered AFTER this await resolves, so without this wiring a
+    // only registered after this await resolves, so without this wiring a
     // cancel during mount would hold the FUSE mount until the timeout fires.
     const onSignalAbort = () => settle(new Error("ZCode AppImage mount aborted"));
     mountChild.stdout.setEncoding("utf8");

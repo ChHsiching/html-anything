@@ -135,7 +135,7 @@ export function WelcomeModal({ onClose }: Props) {
   const installed = agents.filter((a) => a.available);
   const missing = agents.filter((a) => !a.available);
   const selectedAgent = installed.find((a) => a.id === selected);
-  // #38: resolve the persisted pick against the scanned list — a stale id
+  // Resolve the persisted pick against the scanned list: a stale id
   // renders Default active with the revert notice, and never reaches the agent.
   const selectedModelId = selected
     ? resolveAgentModel(selectedAgent?.models, agentModels[selected])
@@ -391,7 +391,7 @@ function ModelPicker({
 }: {
   agent: AgentInfo;
   modelId: string;
-  /** #38: the persisted pick is gone from the list — render the revert notice. */
+  /** The persisted pick is gone from the list; render the revert notice. */
   stalePick?: boolean;
   onPick: (id: string) => void;
 }) {
@@ -417,8 +417,9 @@ function ModelPicker({
         </div>
         <div className="text-[10.5px] text-[var(--ink-mute)] max-w-[200px] text-right leading-snug">
           {agent.protocol === "argv-attach" ? (
-            // #38: ZCode has no --model flag — describing one would be a lie;
-            // show what Default actually does (mirrors the settings picker).
+            // ZCode has no --model flag, so the generic "--model" hint would
+            // be wrong here; show what Default actually does instead
+            // (mirrors the settings picker).
             t("model.defaultHint.zcode")
           ) : (
             <>

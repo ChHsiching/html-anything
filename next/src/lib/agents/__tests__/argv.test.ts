@@ -219,26 +219,15 @@ describe("parseLine bob", () => {
   });
 });
 
-
-// Real NDJSON lines captured from the installed ZCode CLI (3.14.1 desktop
-// bundle, zcode 0.16.9) running `-p … --output-format stream-json --mode
-// yolo` headless. The parser contract is pinned against these real bytes —
-// captured from a live probe run. Noise vocabulary on a single turn:
-// session.titleUpdated / session.resumed / session.updated (plugin hook
-// descriptors), turn.started, the model.streaming kinds, turn.completed, and
-// the bare result terminator line.
 describe("parseLine zcode (argv-attach stream-json)", () => {
-  // Real NDJSON lines captured from the installed ZCode CLI (3.14.1 desktop
-  // bundle, zcode 0.16.9) running `-p … --output-format stream-json --mode
-  // yolo` headless. The parser contract is pinned against these real bytes —
-  // captured from live probe runs. The probes' turns were plain-text replies,
-  // so the
-  // reasoning_delta / tool_call / tool.updated lines below reuse the REAL
-  // envelope (eventId/seq/sessionId/timestamp fields verbatim from the
-  // captures) around payload shapes pinned in the ZCode open-source
-  // contracts (apps/zcode-cli/packages/contracts/src/events/session.events.ts
-  // — ModelStreamingPayload, ToolCallResultPayload — and the tool.updated
-  // kind injection in bootstrap/src/zcode-protocol/session-mapper.ts).
+  // Real NDJSON lines captured from the installed ZCode CLI running
+  // `-p … --output-format stream-json --mode yolo` headless; the parser
+  // contract is pinned against these real bytes. The captured turns were
+  // plain-text replies, so the reasoning_delta / tool_call / tool.updated
+  // lines below reuse the real envelope (eventId/seq/sessionId/timestamp
+  // fields verbatim from the captures) around payload shapes pinned in the
+  // ZCode open-source contracts
+  // (apps/zcode-cli/packages/contracts/src/events/session.events.ts).
   const SESSION = "sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2";
   const TURN = "turn_428dacfc-74fc-4056-9aac-785654cb17bc";
   const envelope = (type: string, payload: unknown, seq: number) =>
@@ -341,7 +330,7 @@ describe("parseLine zcode (argv-attach stream-json)", () => {
   });
 
   it("emits no status line for a Write tool_call targeting a non-HTML path (no rescue, no nameless noise)", () => {
-    // A Write to a .md sidecar rescues nothing (path filter) — but the tool
+    // A Write to a .md sidecar rescues nothing (path filter), but the tool
     // still has a name, so it surfaces as a status line like any other tool.
     const line = envelope(
       "model.streaming",
@@ -363,7 +352,7 @@ describe("parseLine zcode (argv-attach stream-json)", () => {
     expect(parse(
       envelope("model.streaming", { kind: "tool_call", toolCallId: "tc_9", toolName: "Bash", input: { command: "ls" } }, 60),
     )).toEqual([{ kind: "meta", key: "status", value: "调用工具 Bash" }]);
-    // ToolCallResultPayload carries only toolCallId + result + duration — the
+    // ToolCallResultPayload carries only toolCallId + result + duration; the
     // name comes from the map filled by the tool_call event above.
     expect(parse(
       envelope("tool.updated", { kind: "result", toolCallId: "tc_9", result: { success: true, content: "file1\nfile2" }, duration: 120 }, 61),
@@ -396,14 +385,14 @@ describe("parseLine zcode (argv-attach stream-json)", () => {
     expect(
       parseLine(
         "zcode",
-        `{"eventId":"081fe5f4-0d82-493a-be2d-fb69dff0168f","payload":{"directory":"C:\\Users\\Administrator\\Git\\html-anything","interruptedToolCount":0,"messageCount":15,"partCount":31,"recoveredCompactTimelineCount":0,"recoveredSteerInputCount":0,"resumedTodoCount":0},"seq":2,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034228,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.resumed"}`,
+        `{"eventId":"081fe5f4-0d82-493a-be2d-fb69dff0168f","payload":{"directory":"C:\\Users\\dev\\Git\\html-anything","interruptedToolCount":0,"messageCount":15,"partCount":31,"recoveredCompactTimelineCount":0,"recoveredSteerInputCount":0,"resumedTodoCount":0},"seq":2,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034228,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.resumed"}`,
       ),
     ).toEqual([]);
-    // session.updated — plugin hook descriptor (SessionStart frame)
+    // session.updated, plugin hook descriptor (SessionStart frame)
     expect(
       parseLine(
         "zcode",
-        `{"eventId":"704f78d3-0c2d-4566-afd8-c94f6f0906c6","payload":{"descriptor":{"clientVisible":true,"commandDisplay":"node \\"C:\\Users\\Administrator\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1/hooks/session-start-seen-skills.mjs\\"","executionMode":"foreground","executionType":"command","pluginId":"vercel@claude-plugins-official","pluginName":"vercel","sourceKind":"plugin","sourcePath":"C:\\Users\\Administrator\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1\\hooks\\hooks.json","timeoutMs":60000},"hookEventName":"SessionStart","hookIndex":0,"hookCount":4,"startedAt":1790039034230},"seq":3,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034230,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.updated"}`,
+        `{"eventId":"704f78d3-0c2d-4566-afd8-c94f6f0906c6","payload":{"descriptor":{"clientVisible":true,"commandDisplay":"node \\"C:\\Users\\dev\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1/hooks/session-start-seen-skills.mjs\\"","executionMode":"foreground","executionType":"command","pluginId":"vercel@claude-plugins-official","pluginName":"vercel","sourceKind":"plugin","sourcePath":"C:\\Users\\dev\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1\\hooks\\hooks.json","timeoutMs":60000},"hookEventName":"SessionStart","hookIndex":0,"hookCount":4,"startedAt":1790039034230},"seq":3,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034230,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.updated"}`,
       ),
     ).toEqual([]);
   });
@@ -417,7 +406,7 @@ describe("parseLine zcode (argv-attach stream-json)", () => {
     ).toEqual([]);
   });
 
-  it("maps turn.completed to exactly one usage (snake_case) + duration_ms + result meta — verbatim-captured real line", () => {
+  it("maps turn.completed to exactly one usage (snake_case) + duration_ms + result meta (verbatim-captured real line)", () => {
     expect(
       parseLine(
         "zcode",
@@ -452,7 +441,7 @@ describe("parseLine zcode (argv-attach stream-json)", () => {
     ]);
   });
 
-  it("maps the bare result terminator to a session meta only — its usage is the same cumulative numbers turn.completed already reported", () => {
+  it("maps the bare result terminator to a session meta only; its usage is the same cumulative numbers turn.completed already reported", () => {
     expect(
       parseLine(
         "zcode",
@@ -500,8 +489,8 @@ describe("parseLine zcode (argv-attach stream-json)", () => {
 
   it("a full real-turn line sequence yields exactly: deltas, then usage/duration/result, then session (noise: zero output, usage: exactly once)", () => {
     // Ordered slice of the real capture: 2 hook-noise lines, the 7 real
-    // model.streaming lines of the turn (start/text_start/text_delta×3/
-    // text_end/finish), turn.completed, and the result terminator.
+    // model.streaming lines of the turn (start, text_start, three
+    // text_delta, text_end, finish), turn.completed, and the result terminator.
     const parse = makeParser("zcode");
     const out = [
       ...parse(`{"eventId":"ba62ed88-8c55-4431-83ca-32a57b0b2395","payload":{"previousTitle":"","source":"first_input","title":"Reply with exactly the token: PROBE_OK"},"seq":1,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034226,"type":"session.titleUpdated"}`),

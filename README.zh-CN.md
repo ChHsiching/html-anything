@@ -4,7 +4,7 @@
 
 <p align="center"><b>项目主页:</b> <a href="https://open-design.ai/html-anything/"><b>open-design.ai/html-anything/</b></a> —— 不用 clone 也能先看看 HTML Anything 长什么样、能干啥。</p>
 
-> **Markdown 是草稿, HTML 才是给人读的成品 —— 让本地 agent 直接写 HTML。** Agent 时代的 HTML 编辑器 —— 既然你已经不亲手改文档、全都让 Claude 改了, 那 agent 的输出就该是读者真正想看的 HTML, 而不是中间态的 markdown。本地优先、零 API Key、复用你已经登录好的 CLI session —— **9 个 coding-agent CLI** 在 `PATH` 上自动识别（Claude Code · Cursor Agent · Codex · Gemini CLI · GitHub Copilot CLI · OpenCode · Qwen Coder · Aider · IBM Bob），以及 **ZCode**（Electron 应用，从安装路径自动发现），驱动 **75 套 skill 模板** 和 **9 类可交付场景**（杂志文章 · Keynote PPT · 简历 · 海报 · 小红书 · 推特卡 · Web 原型 · 数据报告 · Hyperframes 视频）。一键复制到公众号 / 推特 / 知乎，或者下载 `.html` / `.png`。
+> **Markdown 是草稿, HTML 才是给人读的成品 —— 让本地 agent 直接写 HTML。** Agent 时代的 HTML 编辑器 —— 既然你已经不亲手改文档、全都让 Claude 改了, 那 agent 的输出就该是读者真正想看的 HTML, 而不是中间态的 markdown。本地优先、零 API Key、复用你已经登录好的 CLI session —— **9 个 coding-agent CLI** 在 `PATH` 上自动识别（Claude Code · Cursor Agent · Codex · Gemini CLI · GitHub Copilot CLI · OpenCode · Qwen Coder · Aider · IBM Bob），以及 **ZCode**（CLI 内置在 Electron 应用里，从安装路径自动发现），驱动 **75 套 skill 模板** 和 **9 类可交付场景**（杂志文章 · Keynote PPT · 简历 · 海报 · 小红书 · 推特卡 · Web 原型 · 数据报告 · Hyperframes 视频）。一键复制到公众号 / 推特 / 知乎，或者下载 `.html` / `.png`。
 
 <p align="center">
   <img src="docs/assets/banner.png" alt="HTML Anything — agent 时代的 HTML 编辑器，在你的笔记本上" width="100%" />
@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square" /></a>
-  <a href="#-自动识别本地-agent"><img alt="Agents" src="https://img.shields.io/badge/agents-10-black?style=flat-square" /></a>
+  <a href="#-自动识别本地-agent"><img alt="Agents" src="https://img.shields.io/badge/agents-9%20CLIs-black?style=flat-square" /></a>
   <a href="#-skills"><img alt="Skills" src="https://img.shields.io/badge/skills-75-orange?style=flat-square" /></a>
   <a href="#一键发布到平台"><img alt="Export" src="https://img.shields.io/badge/export-WeChat%20%C2%B7%20X%20%C2%B7%20Zhihu%20%C2%B7%20PNG-9b59b6?style=flat-square" /></a>
   <a href="#-30-秒上手"><img alt="Quickstart" src="https://img.shields.io/badge/quickstart-30%20seconds-green?style=flat-square" /></a>
@@ -203,7 +203,7 @@ pnpm -F @html-anything/e2e test
 | **Qwen Coder** | `qwen` | `qwen --yolo -` |
 | **Aider** | `aider` | `aider --no-pretty --no-stream --yes-always --message-file -` |
 | **IBM Bob** | `bob` | `bob --output-format stream-json --hide-intermediary-output` |
-| **ZCode** | `node` | `node <zcode.cjs> -p <引导语> --attach <prompt.md> --output-format stream-json`（headless CLI 一次性模式；Electron 应用，从安装路径发现）|
+| **ZCode** | `node` | `node <zcode.cjs> -p <引导语> --attach <prompt.md> --output-format stream-json`（Electron 应用内置的 headless CLI，一次性执行） |
 
 > 这一层的设计直接借鉴了 [`nexu-io/open-design`](https://github.com/nexu-io/open-design) 和 [`multica-ai/multica`](https://github.com/multica-ai/multica) 的 agent 检测策略：唯一被 spawn 子进程的进程是 server route，业务进程不直接 spawn；CLI 的 stdin / stdout 用 JSON-line 协议复用，每个 CLI 一个轻 adapter，统一在 [`next/src/lib/agents/argv.ts`](next/src/lib/agents/argv.ts)。
 
@@ -211,10 +211,10 @@ pnpm -F @html-anything/e2e test
 
 ### ZCode 相关说明
 
-- **模型选择跟随 ZCode GUI。** ZCode 的模型选择器列出 ZCode 桌面端当前计划下的模型 × 思考档位；选 `Default` 则跟随该计划的当前默认（chip 标签会写明）。在 ZCode 里切换计划后，到设置里重新扫描即可刷新列表。每轮生成都会确定性绑定到所选模型——绑定链路断掉时按明确指引报错拒绝，绝不静默改道。
-- **附件尺寸上限。** 完整 prompt 以 `.md` 附件投递；ZCode 读取附件的上限为 **256 KB / 2000 行**——超长内容可能被截断。
-- **每轮成本受插件配置影响。** ZCode 每轮加载你的插件；重度配置实测每轮多消耗约 10 万 input token、慢约 18 秒，输出目录旁还可能出现插件产物。嫌慢请在 ZCode 侧精简插件——html-anything 永不写 ZCode 的配置。
-- **生成会话保留在 ZCode 里。** 每次生成的会话在 ZCode GUI 中可见、可续聊——用 GUI 打开生成目录对应的工作区即可。
+- **模型选择跟随 ZCode GUI** —— 选择器列出 ZCode 桌面端当前所选计划下的模型与思考档位；选 `Default` 即跟随该计划的当前默认。切换计划后到设置里重新扫描即可刷新；模型绑定失效时生成会直接报错，不会悄悄换一个模型。
+- **附件尺寸上限** —— 完整 prompt 以 `.md` 附件发送；ZCode 只读取 **256 KB / 2000 行** 以内的附件，超出即截断。
+- **每轮成本受插件配置影响** —— ZCode 每轮加载你的插件；重度配置实测每轮多花约 10 万 input token、慢约 18 秒，插件产物还可能出现在输出旁边。嫌慢就在 ZCode 侧精简插件；html-anything 只往 ZCode 写一样东西：凭据库里的一个登录身份键。
+- **生成会话保留在 ZCode 里** —— 每次生成的会话仍在 ZCode GUI 里；打开生成目录对应的工作区就能继续。
 
 ## 🎨 Skills
 

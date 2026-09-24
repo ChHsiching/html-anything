@@ -1,4 +1,4 @@
-// #38: persisted model-choice resolution — a stale pick falls back to
+// Persisted model-choice resolution: a stale pick falls back to
 // "default" everywhere it is read (send paths + pickers), while a
 // not-yet-loaded agent list passes picks through untouched.
 import { describe, expect, it } from "vitest";
@@ -17,7 +17,7 @@ describe("resolveAgentModel", () => {
 
   it("a stale pick (list loaded, id gone) falls back to default", () => {
     expect(resolveAgentModel(MODELS, "GLM-5.2/high")).toBe("default");
-    // e.g. a bare pre-#41 id persisted by an older UI
+    // e.g. a bare id persisted by an older UI
     expect(resolveAgentModel(MODELS, "GLM-5.2")).toBe("default");
   });
 

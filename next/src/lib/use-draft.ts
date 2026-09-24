@@ -15,7 +15,7 @@ type DraftStatus = "idle" | "running" | "done" | "error";
  * Streams a markdown draft from the selected coding agent and appends it
  * to the active task's textarea content as it arrives. Mirrors the SSE
  * conventions of `useConvert()` (start / delta / meta / done events) but
- * targets `task.content` instead of `task.html` and uses `/api/draft`,
+ * targets `task.content` rather than `task.html` and uses `/api/draft`,
  * which prompts the agent for plain markdown — never HTML.
  */
 export function useDraft() {
@@ -42,7 +42,7 @@ export function useDraft() {
       return;
     }
     const taskId = store.activeTaskId;
-    // #38: a stale persisted pick falls back to Default instead of being sent.
+    // A stale persisted pick falls back to Default and is never sent on.
     const agentInfo = store.agents.find((a) => a.id === agent);
     const resolvedModel = resolveAgentModel(agentInfo?.models, store.agentModels[agent]);
     const model = resolvedModel !== "default" ? resolvedModel : undefined;

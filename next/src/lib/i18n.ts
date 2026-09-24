@@ -437,15 +437,15 @@ const en: Dict = {
   "model.defaultHint.suffix": " and lets the CLI pick.",
   "model.defaultHint.zcode": "Default follows the current plan in the ZCode GUI.",
   "model.defaultLabel": "Default (CLI config)",
-  "model.staleNotice": "The saved model choice is no longer offered by this agent; reverted to Default.",
+  "model.staleNotice": "The saved model is no longer in this agent's list; reverted to Default.",
 
   "agent.selected": "Selected",
   "agent.notInstalled": "Not installed",
   "agent.notReady": "Installed · not ready",
   "agent.notReady.guiNotInitialized":
-    "ZCode has never been opened on this machine. Open the ZCode GUI once, log in and pick a model, then rescan.",
+    "ZCode has never been opened on this machine. Open the ZCode GUI, log in, pick a model, then rescan.",
   "agent.notReady.notLoggedIn":
-    "ZCode is installed but not logged in / no model selected. Open the ZCode GUI, log in and pick a model, then rescan.",
+    "ZCode is installed but has no login or model yet. Open the ZCode GUI, log in, pick a model, then rescan.",
   "agent.customBin.eyebrow": "custom path",
   "agent.customBin.subtitle": "Override the auto-detected binary for {agent}",
   "agent.customBin.detected": "Auto-detected:",
@@ -807,15 +807,15 @@ const zhCN: Dict = {
   "model.defaultHint.suffix": ", 由 CLI 自己挑",
   "model.defaultHint.zcode": "选 Default 时跟随 ZCode GUI 当前计划。",
   "model.defaultLabel": "Default (CLI config)",
-  "model.staleNotice": "已保存的模型选择已不在该 agent 的列表中，已回退为 Default。",
+  "model.staleNotice": "保存的模型已不在该 agent 列表中，已回退为 Default。",
 
   "agent.selected": "SELECTED",
   "agent.notInstalled": "未安装",
   "agent.notReady": "已安装 · 未就绪",
   "agent.notReady.guiNotInitialized":
-    "本机从未打开过 ZCode。请先打开 ZCode GUI 并登录、选择一个模型，然后重新扫描。",
+    "本机从未打开过 ZCode。打开 ZCode GUI，登录并选一个模型，然后重新扫描。",
   "agent.notReady.notLoggedIn":
-    "ZCode 已安装但尚未登录 / 未选择模型。请打开 ZCode GUI 登录并选择一个模型，然后重新扫描。",
+    "ZCode 已安装，但还没登录或选模型。打开 ZCode GUI，登录并选一个模型，然后重新扫描。",
   "agent.customBin.eyebrow": "自定义路径",
   "agent.customBin.subtitle": "手动指定 {agent} 的二进制路径",
   "agent.customBin.detected": "自动检测到:",

@@ -6,16 +6,17 @@ const { mockSpawn, existsSyncDelegate, mockMkdtempSync, mockWriteFileSync, mockR
   return {
     mockSpawn: vi.fn(),
     existsSyncDelegate: vi.fn((p: string) => p === "/bin/sh"),
-    // argv-attach (zcode) prompt-delivery seam: the invoke layer mkdtemps a temp dir, writes prompt.md into it, and rmSyncs the dir on every exit
+    // argv-attach (zcode) prompt-delivery path: the invoke layer mkdtemps a temp dir, writes prompt.md into it, and rmSyncs the dir on every exit
     // path. Mocked so the tests assert the write/cleanup contract without
     // touching the real temp filesystem.
     mockMkdtempSync: vi.fn((prefix: string) => `${prefix}TEST`),
     mockWriteFileSync: vi.fn(),
     mockRmSync: vi.fn(),
-    // The per-turn model binding seam. invoke calls ONE function from
-    // the protocol package; everything else in that module stays real (the
-    // unmocked-export lesson). The ok-result is the shape a real
-    // prepared binding returns; refusal tests swap `mockPrepareBinding.mockReturnValue`.
+    // The per-turn model binding boundary. invoke calls one function from
+    // the binding module; everything else in that module stays real (keep
+    // the module's exports real so this mock keeps working). The ok-result
+    // is the shape a real prepared binding returns; refusal tests swap
+    // `mockPrepareBinding.mockReturnValue`.
     mockPrepareBinding: vi.fn(),
     bindingOkResult: {
       ok: true as const,
@@ -127,8 +128,8 @@ describe("invokeAgent", () => {
   // shared argv spawn must pass argv verbatim, matching the `main` baseline.
   // cli's shared branch was already bare (only next's was touched), so this
   // pins that correctness against future regressions. Mirrors next's quoting case.
-  describe("argv branch — no per-element quoting", () => {
-    it("argv-protocol agent (deepseek-tui) spawns with bare argv elements on win32 — no per-element quoting", async () => {
+  describe("argv branch without per-element quoting", () => {
+    it("argv-protocol agent (deepseek-tui) spawns with bare argv elements on win32 without per-element quoting", async () => {
       // Force win32 so the shared branch takes the useShell path. Restore in
       // finally so a mid-assertion throw can't poison sibling tests.
       const originalPlatform = process.platform;
@@ -151,7 +152,7 @@ describe("invokeAgent", () => {
         child.emit("close", 0);
         await eventsPromise;
 
-        // spawn called once; argv (2nd arg) is bare — no element wrapped in
+        // spawn called once; argv (2nd arg) is bare, no element wrapped in
         // quotes (the `main` baseline).
         expect(mockSpawn).toHaveBeenCalledTimes(1);
         const call = mockSpawn.mock.calls[0];
@@ -621,7 +622,7 @@ describe("invokeAgent", () => {
   // Drives `invokeAgent` end-to-end for the registered `protocol:
   // "argv-attach"` agent. The AgentDef's binArgs carry the
   // `<resolved-zcode-cjs>` sentinel; invoke-time substitution fills it from
-  // resolveZcodeBin(), which honours ZCODE_BIN — stubbed here to
+  // resolveZcodeBin(), which honours ZCODE_BIN (stubbed here to
   // `/resolved/zcode.cjs` so the spawn runs `node /resolved/zcode.cjs -p …`
   // without depending on a real install. spawn is mocked; the fake CLI child
   // emits the captured real NDJSON stream on stdout, and notifications
@@ -629,14 +630,14 @@ describe("invokeAgent", () => {
   // Real NDJSON lines captured from the installed ZCode CLI (3.14.1 desktop
   // bundle, zcode 0.16.9) running `-p … --output-format stream-json --mode
   // yolo` headless. The adapter's parser and invoke plumbing are pinned against
-  // these real bytes, not a hand-written sketch — captured from a live probe
-  // run. Includes the full noise vocabulary observed on a
+  // these real bytes, captured from a real CLI run, not a hand-written sketch.
+  // Includes the full noise vocabulary observed on a
   // single turn: session.titleUpdated / session.resumed / session.updated
   // (plugin hook descriptors), turn.started, the model.streaming kinds, the
   // turn.completed envelope, and the bare result terminator line.
   const ZCODE_STREAM_JSON = String.raw`{"eventId":"ba62ed88-8c55-4431-83ca-32a57b0b2395","payload":{"previousTitle":"","source":"first_input","title":"Reply with exactly the token: PROBE_OK"},"seq":1,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034226,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.titleUpdated"}
-  {"eventId":"081fe5f4-0d82-493a-be2d-fb69dff0168f","payload":{"directory":"C:\\Users\\Administrator\\Git\\html-anything","interruptedToolCount":0,"messageCount":15,"partCount":31,"recoveredCompactTimelineCount":0,"recoveredSteerInputCount":0,"resumedTodoCount":0},"seq":2,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034228,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.resumed"}
-  {"eventId":"704f78d3-0c2d-4566-afd8-c94f6f0906c6","payload":{"descriptor":{"clientVisible":true,"commandDisplay":"node \"C:\\Users\\Administrator\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1/hooks/session-start-seen-skills.mjs\"","executionMode":"foreground","executionType":"command","pluginId":"vercel@claude-plugins-official","pluginName":"vercel","sourceKind":"plugin","sourcePath":"C:\\Users\\Administrator\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1\\hooks\\hooks.json","timeoutMs":60000},"hookEventName":"SessionStart","hookIndex":0,"hookCount":4,"hookInvocationId":"b5547636-0e41-4c9b-b95d-32941f50b6aa","hookRunId":"4699df10-ce5a-42c2-bfde-f7213e1a95a6","hookSource":"plugin.vercel@claude-plugins-official.SessionStart.1.0","matcher":"startup|resume|clear|compact","startedAt":1790039034230},"seq":3,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034230,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.updated"}
+  {"eventId":"081fe5f4-0d82-493a-be2d-fb69dff0168f","payload":{"directory":"C:\\Users\\dev\\Git\\html-anything","interruptedToolCount":0,"messageCount":15,"partCount":31,"recoveredCompactTimelineCount":0,"recoveredSteerInputCount":0,"resumedTodoCount":0},"seq":2,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034228,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.resumed"}
+  {"eventId":"704f78d3-0c2d-4566-afd8-c94f6f0906c6","payload":{"descriptor":{"clientVisible":true,"commandDisplay":"node \"C:\\Users\\dev\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1/hooks/session-start-seen-skills.mjs\"","executionMode":"foreground","executionType":"command","pluginId":"vercel@claude-plugins-official","pluginName":"vercel","sourceKind":"plugin","sourcePath":"C:\\Users\\dev\\.zcode\\cli\\plugins\\cache\\claude-plugins-official\\vercel\\0.45.1\\hooks\\hooks.json","timeoutMs":60000},"hookEventName":"SessionStart","hookIndex":0,"hookCount":4,"hookInvocationId":"b5547636-0e41-4c9b-b95d-32941f50b6aa","hookRunId":"4699df10-ce5a-42c2-bfde-f7213e1a95a6","hookSource":"plugin.vercel@claude-plugins-official.SessionStart.1.0","matcher":"startup|resume|clear|compact","startedAt":1790039034230},"seq":3,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039034230,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","type":"session.updated"}
   {"eventId":"2bf2eb12-0196-4448-9546-fa9bdbbdfd2e","payload":{"executionStartedAt":1790039035583.7253,"turnNumber":7,"input":"Reply with exactly the token: PROBE_OK","messageId":"msg_mubz0vk6_f9084d10-58cb-4fb2-b226-98373bfe8cec","foregroundExecutionId":"runtime_command_1","queryId":"query_cf24b136-0c0f-4afc-a83d-ced3669c001a"},"seq":11,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039035590,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"turn.started"}
   {"eventId":"dbd9ae00-db4f-4710-ae4b-c4b66ee1600f","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"","done":false,"kind":"start"},"seq":20,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046426,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
   {"eventId":"2dee4cce-ca91-4521-95e3-b4b68ceaf5d39","payload":{"assistantMessageId":"msg_mubz0ze1_3fd06d2d-4911-4f90-8aa7-db4660374462","delta":"","done":false,"kind":"text_start"},"seq":21,"sessionId":"sess_87b8cfd7-66c0-43d1-8133-23a659bae7b2","timestamp":1790039046426,"traceId":"fac306de-bf37-4eff-94ca-eb8476962e3c","turnId":"turn_428dacfc-74fc-4056-9aac-785654cb17bc","type":"model.streaming"}
@@ -677,18 +678,18 @@ describe("invokeAgent", () => {
     return { child, stdout, stderr };
   }
 
-  describe("invokeAgent — zcode CLI one-shot (argv-attach)", () => {
+  describe("invokeAgent zcode CLI one-shot (argv-attach)", () => {
     beforeEach(() => {
       // resolveZcodeBin() must return the test .cjs so the binArgs sentinel
       // resolves to it (invoke-time substitution). The resolved node driver is
       // an absolute `.exe`-style path, so the spawn takes the DIRECT (no-shell)
-      // Windows path — argv passes verbatim on every host platform.
+      // Windows path and argv passes verbatim on every host platform.
       vi.stubEnv("ZCODE_BIN", "/resolved/zcode.cjs");
-      // The host may carry the GUI-inherited provider-config PAIR (running the
+      // The host may carry the GUI-inherited provider-config pair (running the
       // tests inside a ZCode-spawned terminal exports ZCODE_PERSONAL/_BUILTIN_
-      // PROVIDER_CONFIG_FILE to children — the same host pollution the
-      // probes hit). Force it ABSENT so the binding-active tests are
-      // deterministic on every host; the passthrough test stubs the pair back on.
+      // PROVIDER_CONFIG_FILE to children). Force it absent so the
+      // binding-active tests are deterministic on every host; the passthrough
+      // test stubs the pair back on.
       delete process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE;
       delete process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE;
       existsSyncDelegate.mockImplementation((p: string) =>
@@ -713,7 +714,7 @@ describe("invokeAgent", () => {
     const attachDir = () => mockMkdtempSync.mock.results[0]?.value as string;
     const attachFile = () => path.join(attachDir(), "prompt.md");
     // Fake-timer tests drive start() to completion through microtasks only
-    // (process.nextTick is NOT faked) — the same helper the mount describe
+    // (process.nextTick is NOT faked); the same helper the mount describe
     // uses for its 5s-timeout test.
     const flushMicrotasks = async (iterations = 200) => {
       for (let i = 0; i < iterations; i++) {
@@ -749,17 +750,17 @@ describe("invokeAgent", () => {
         Record<string, unknown>,
       ];
       // Absolute `.exe` bin → DIRECT spawn on win32 (no cmd.exe), plain spawn
-      // elsewhere: argv elements verbatim on every host — spaced install paths
+      // elsewhere: argv elements verbatim on every host, so spaced install paths
       // survive with no quoting games.
       expect(spawnBin).toBe("/resolved/node.exe");
       expect(spawnOpts.shell ?? false).toBeFalsy();
       // argv[0] is the resolved .cjs (argv[1] of the real process; a bare
-      // executable would be rejected by Node as an arg) — never `app-server`.
+      // executable would be rejected by Node as an arg), never `app-server`.
       expect(spawnArgv[0]).toBe("/resolved/zcode.cjs");
       expect(spawnArgv).not.toContain("app-server");
       const pIdx = spawnArgv.indexOf("-p");
       expect(pIdx).toBe(1);
-      // `-p` carries the fixed short guide, NOT the prompt.
+      // `-p` holds the fixed short guide, NOT the prompt.
       expect(spawnArgv[pIdx + 1]).not.toBe("build it");
       expect(spawnArgv[pIdx + 1]!.length).toBeLessThan(200);
       // The prompt travels as the --attach temp file.
@@ -804,7 +805,7 @@ describe("invokeAgent", () => {
       );
     });
 
-    // The per-turn model binding: the PAIRED provider-config env vars ride
+    // The per-turn model binding: the paired provider-config env vars ride
     // the spawn env (personal → the temp clone, builtin → the catalog file the
     // selection was validated against), and the bound model surfaces as a meta
     // event so the log shows what the turn was pinned to.
@@ -848,7 +849,7 @@ describe("invokeAgent", () => {
     });
 
     // Fail-refuse: a broken link in the resolution chain refuses the spawn
-    // with the actionable error instead of silently falling back to whatever the
+    // with the refusal error rather than silently falling back to whatever the
     // CLI would pick on its own.
     it("refuses to spawn when the binding resolution fails (error event, no spawn, temp cleaned)", async () => {
       mockPrepareBinding.mockReturnValue({
@@ -875,10 +876,10 @@ describe("invokeAgent", () => {
       expect(mockRmSync).toHaveBeenCalledWith(attachDir(), expect.anything());
     });
 
-    // Escape hatch: a user who pre-set BOTH provider-config vars keeps
+    // Escape hatch: a user who pre-set both provider-config vars keeps
     // them verbatim (zero-code reroute); the adapter neither overrides them nor
     // prepares its own binding.
-    it("passes a user-set env PAIR through untouched and skips its own binding", async () => {
+    it("passes a user-set env pair through untouched and skips its own binding", async () => {
       vi.stubEnv("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "/user/personal.json");
       vi.stubEnv("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", "/user/builtin.json");
       const { child, stdout } = makeFakeChild();
@@ -907,7 +908,7 @@ describe("invokeAgent", () => {
       expect(spawnOpts.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe("/user/builtin.json");
     });
 
-    it("bridges the full stream-json surface: deltas, usage/duration/result, session — noise lines produce nothing, usage exactly once", async () => {
+    it("bridges the full stream-json surface: deltas, usage/duration/result, session; noise lines produce nothing and usage is emitted exactly once", async () => {
       const { child, stdout } = makeFakeChild();
       mockSpawn.mockReturnValue(child);
 
@@ -929,10 +930,10 @@ describe("invokeAgent", () => {
       const deltas = events.filter((e) => e.type === "delta");
       expect(deltas.map((d) => (d as { text: string }).text)).toEqual(["PRO", "BE", "_OK"]);
       // Noise envelope lines (session.updated hook frames …) and turn.started
-      // produce NOTHING — dropped, not forwarded as raw / error events. The
+      // produce nothing: dropped, not forwarded as raw / error events. The
       // meta events are exactly: the bound-model line after start, then
       // turn.completed's usage (snake_case) + duration_ms + resultType, then
-      // the result terminator's sessionId. usage appears EXACTLY once — the
+      // the result terminator's sessionId. usage appears exactly once; the
       // terminator's duplicate cumulative numbers are never re-emitted.
       expect(events.filter((e) => e.type === "raw")).toEqual([]);
       expect(events.filter((e) => e.type === "error")).toEqual([]);
@@ -995,13 +996,13 @@ describe("invokeAgent", () => {
         { type: "meta", key: "status", value: "调用工具 WebSearch" },
         { type: "meta", key: "status", value: "工具 WebSearch 完成" },
       ]);
-      // The Write tool's input IS the deliverable — forwarded as a canonical
+      // The Write tool's input is the deliverable, forwarded as a canonical
       // html event (replaces streamed text), not a status line.
       expect(events.filter((e) => e.type === "html")).toEqual([
         { type: "html", text: "<html><body>r</body></html>" },
       ]);
       // The nameless result (no preceding tool_call for tc_9_unknown) emits
-      // no status line at all — a bare ✓ with no context is noise.
+      // no status line at all; a bare ✓ with no context is noise.
     });
 
     it("maps turn.failed to an error event (consumer-side red-error gate fires on it)", async () => {
@@ -1017,7 +1018,7 @@ describe("invokeAgent", () => {
       await new Promise((r) => setTimeout(r, 0));
       const eventsPromise = collectStream(stream);
 
-      // Verbatim-captured real failure line (diag-fresh-stdout.jsonl):
+      // Verbatim-captured failure line from a real failed run:
       // fresh-config turn whose model binding never resolved.
       stdout.write(
         `{"eventId":"d66c6937-6bd7-4f3d-a38a-43d252a1e052","payload":{"error":{"type":"unknown_error","attribution":{"retryable":false},"code":"CONFIGURATION_ERROR","message":"Select a model before continuing","detail":"Model creation failed"},"turnPhase":"model_creation"},"seq":1,"sessionId":"sess_b154be6b-7148-4098-8d80-6f717ce7bdb8","timestamp":1790041331523,"turnId":"turn_28ed2805-a161-450f-a426-9f3182f003bb","type":"turn.failed"}\n`,
@@ -1037,7 +1038,7 @@ describe("invokeAgent", () => {
       });
     });
 
-    it("writes the full prompt to the attach temp file — not on argv, not on stdin", async () => {
+    it("writes the full prompt to the attach temp file (not on argv, not on stdin)", async () => {
       const { child, stdout, stdinWrites } = makeFakeChild();
       mockSpawn.mockReturnValue(child);
 
@@ -1148,7 +1149,7 @@ describe("invokeAgent", () => {
       });
 
       await flushMicrotasks();
-      // A NOISE line (session.* — parses to zero events) arrives mid-window.
+      // A NOISE line (session.*, parses to zero events) arrives mid-window.
       // It must NOT reset the clock: the watchdog counts PARSED events only.
       vi.advanceTimersByTime(90_000);
       stdout.write(`${zcodeLines()[0]}\n`);
@@ -1160,7 +1161,7 @@ describe("invokeAgent", () => {
       const errors = events.filter((e) => e.type === "error");
       expect(errors).toHaveLength(1);
       expect((errors[0] as { message?: string }).message).toMatch(/no stream events for 180s/);
-      // Child killed, attach temp dir removed, stream closed — and NO done
+      // Child killed, attach temp dir removed, stream closed, and NO done
       // event: the turn failed, it did not complete.
       expect(killSpy).toHaveBeenCalled();
       expect(mockRmSync).toHaveBeenCalledWith(attachDir(), { recursive: true, force: true });
@@ -1306,7 +1307,7 @@ describe("invokeAgent", () => {
       expect(message).not.toContain("HEAD_MARKER");
     });
 
-    it("keeps the exit-0 close shape — no exit error", async () => {
+    it("keeps the exit-0 close shape with no exit error", async () => {
       const { child, stdout } = makeFakeChild();
       mockSpawn.mockReturnValue(child);
 
@@ -1328,7 +1329,7 @@ describe("invokeAgent", () => {
       expect(events.some((e) => e.type === "done")).toBe(true);
     });
 
-    it("clears the watchdog on abort — nothing fires after the cancel", async () => {
+    it("clears the watchdog on abort; nothing fires after the cancel", async () => {
       vi.useFakeTimers();
       const { child } = makeFakeChild();
       const killSpy = vi.fn();
@@ -1361,7 +1362,7 @@ describe("invokeAgent", () => {
     });
   });
 
-  describe("invokeAgent — Linux AppImage self-mount (CLI one-shot form)", () => {
+  describe("invokeAgent Linux AppImage self-mount (CLI one-shot form)", () => {
     const mountCjs = (mp: string) => `${mp}/resources/glm/zcode.cjs`;
     const REAL_PLATFORM = process.platform;
     const flushMicrotasks = async (iterations = 200) => {
@@ -1393,7 +1394,7 @@ describe("invokeAgent", () => {
     const isMountSpawn = (argv: string[]) => argv.includes("--appimage-mount");
 
     // (1) The mount child is spawned BEFORE the CLI child, and the CLI argv
-    // carries the mount-point cjs path (not the AppImage path).
+    // holds the mount-point cjs path (not the AppImage path).
     it("mounts the AppImage before spawning the CLI; cjs argv is the mount-point path", async () => {
       Object.defineProperty(process, "platform", { value: "linux", configurable: true });
       const mountPoint = "/tmp/.mount_ZCode-xxxx";
@@ -1425,7 +1426,7 @@ describe("invokeAgent", () => {
       expect(mountCall[0]).toBe("/opt/ZCode.AppImage");
       expect(mountCall[1]).toEqual(["--appimage-mount"]);
       expect(appCall[0]).toBe("/resolved/node.exe");
-      // CLI argv: mount-point cjs in argv[0], the one-shot flags — and no
+      // CLI argv: mount-point cjs in argv[0], the one-shot flags, and no
       // `app-server` subcommand anywhere.
       expect(appCall[1][0]).toBe(mountCjs(mountPoint));
       expect(appCall[1]).not.toContain("app-server");
@@ -1435,7 +1436,7 @@ describe("invokeAgent", () => {
     });
 
     // (2) The start event reports the mount-point cjs argv (proves the cjs path
-    // flows through to the caller, not just the spawn).
+    // flows through to the caller, not only to the spawn).
     it("reports the mount-point cjs path in the start event argv", async () => {
       Object.defineProperty(process, "platform", { value: "linux", configurable: true });
       const mountPoint = "/tmp/.mount_ZCode-yyyy";
@@ -1468,7 +1469,7 @@ describe("invokeAgent", () => {
     });
 
     // (3) When the CLI child dies mid-turn, teardown kills the mount child
-    // too (per-turn mount+unmount — no leak across turns).
+    // too (per-turn mount+unmount, no leak across turns).
     it("kills the mount child when the CLI child dies mid-turn", async () => {
       Object.defineProperty(process, "platform", { value: "linux", configurable: true });
       const mount = makeMountChild("/tmp/.mount_ZCode-zzz");
@@ -1495,8 +1496,8 @@ describe("invokeAgent", () => {
       expect(mountKillSpy).toHaveBeenCalled();
     });
 
-    // (4) When the stream consumer cancels, cancel() — a ReadableStream sibling
-    // of start() — kills the mount child (it can't reach start()'s locals).
+    // (4) When the stream consumer cancels, cancel() (a ReadableStream sibling
+    // of start()) kills the mount child (it can't reach start()'s locals).
     it("kills the mount child when the stream consumer cancels", async () => {
       Object.defineProperty(process, "platform", { value: "linux", configurable: true });
       const mount = makeMountChild("/tmp/.mount_ZCode-cancel");
@@ -1547,13 +1548,13 @@ describe("invokeAgent", () => {
       const errors = events.filter((e) => e.type === "error");
       expect(errors.length).toBeGreaterThanOrEqual(1);
       expect((errors[0] as { message?: string }).message).toMatch(/mount/i);
-      // Only the mount child was spawned — the CLI never reached.
+      // Only the mount child was spawned; the CLI never reached.
       expect(mockSpawn).toHaveBeenCalledTimes(1);
       // Mount child was cleaned up on the failure path.
       expect(mountKillSpy).toHaveBeenCalled();
     });
 
-    // (6) Mount setup has a bounded ~5s timeout . A mount that never
+    // (6) Mount setup has a bounded ~5s timeout. A mount that never
     // prints a point fires the timeout, emits a clear error, and cleans up.
     it("fires a clear error after the 5s mount timeout and cleans up the mount child", async () => {
       vi.useFakeTimers();
@@ -1623,11 +1624,11 @@ describe("invokeAgent", () => {
     // resolveZcodeBin() honours a ZCODE_BIN that
     // points directly at the zcode.cjs bundle (the detect tests set
     // ZCODE_BIN=<…>.cjs and assert available=true). For a `.cjs` the AppImage
-    // self-mount would spawn `<.cjs> --appimage-mount` and fail — a JS bundle is
+    // self-mount would spawn `<.cjs> --appimage-mount` and fail; a JS bundle is
     // not an executable AppImage. So on Linux the `.cjs` is used directly:
-    // exactly ONE spawn (the CLI child), argv carries the override in argv[0],
+    // exactly ONE spawn (the CLI child), argv holds the override in argv[0],
     // and no spawn argv contains `--appimage-mount`.
-    it("uses a ZCODE_BIN .cjs override directly on Linux — no AppImage mount", async () => {
+    it("uses a ZCODE_BIN .cjs override directly on Linux with no AppImage mount", async () => {
       Object.defineProperty(process, "platform", { value: "linux", configurable: true });
       vi.stubEnv("ZCODE_BIN", "/opt/zcode/override.cjs");
       existsSyncDelegate.mockImplementation((p: string) =>
@@ -1654,12 +1655,12 @@ describe("invokeAgent", () => {
 
       const events = await eventsPromise;
 
-      // Exactly ONE spawn — the CLI child. No mount child is spawned.
+      // Exactly ONE spawn, the CLI child. No mount child is spawned.
       expect(mockSpawn).toHaveBeenCalledTimes(1);
       const calls = mockSpawn.mock.calls as unknown as [string, string[]][];
       const [appCall] = calls;
       expect(appCall[0]).toBe("/resolved/node.exe");
-      // argv uses the .cjs override verbatim — NOT a `<mount>/resources/glm/...` path.
+      // argv uses the .cjs override verbatim, NOT a `<mount>/resources/glm/...` path.
       expect(appCall[1][0]).toBe("/opt/zcode/override.cjs");
       // No spawn argv contains `--appimage-mount` (the mount flow never ran).
       for (const [, argv] of calls) {

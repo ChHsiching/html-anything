@@ -1,4 +1,4 @@
-ProviderBusinessError: 1 validation error: {'type': 'literal_error', 'loc': ('body', 'reasoning_effort'), 'msg': "Input should be 'low', 'medium' or 'high'", 'input': 'max', 'ctx': {'expected': "'low', 'medium' or 'high'"}} File "/root/miniconda/envs/ray/lib/python3.10/site-packages/sglang/srt/entrypoints/http_server.py", line 1141, in openai_v1_chat_completions POST /v1/chat/completions [{'type': 'literal_error', 'loc': ('body', 'reasoning_effort'), 'msg': "Input should be 'low', 'medium' or 'high'", 'input': 'max', 'ctx': {'expected': "'low', 'medium' or 'high'"}}]
+ProviderBusinessError: 1 validation error: {'type': 'literal_error', 'loc': ('body', 'reasoning_effort'), 'msg': "Input should be 'low', 'medium' or 'high'", 'input': 'max', 'ctx': {'expected': "'low', 'medium' or 'high'"}} File "/home/user/envs/ray/lib/python3.10/site-packages/sglang/srt/entrypoints/http_server.py", line 1141, in openai_v1_chat_completions POST /v1/chat/completions [{'type': 'literal_error', 'loc': ('body', 'reasoning_effort'), 'msg': "Input should be 'low', 'medium' or 'high'", 'input': 'max', 'ctx': {'expected': "'low', 'medium' or 'high'"}}]
     at detectProviderBusinessError (C:\Program Files\ZCode\resources\glm\zcode.cjs:2047:10939)
     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
     at async Object.fetch (C:\Program Files\ZCode\resources\glm\zcode.cjs:2047:10435)
@@ -7,5 +7,5 @@ ProviderBusinessError: 1 validation error: {'type': 'literal_error', 'loc': ('bo
   code: 'PROVIDER_BUSINESS_ERROR',
   isProviderBusinessError: true,
   providerCode: 400,
-  providerId: '42c7e100-ae54-4b64-8d9d-45ae140c57db',
+  providerId: '00000000-1111-4222-8333-444444444444',
   providerKind: 'openai-compatible',

@@ -187,7 +187,7 @@ function AgentSection() {
   };
 
   useEffect(() => {
-    // #38: refresh on EVERY mount — ZCode's plan chips and readiness change
+    // Refresh on every mount: ZCode's plan chips and readiness change
     // with the GUI state, so a list cached from a previous mount would be
     // stale (the same reasoning as the not-ready amber state).
     load();
@@ -197,7 +197,7 @@ function AgentSection() {
   const installed = useMemo(() => agents.filter((a) => a.available), [agents]);
   const missing = useMemo(() => agents.filter((a) => !a.available), [agents]);
   const selectedAgent = installed.find((a) => a.id === selected);
-  // #38: resolve the persisted pick against the (freshly scanned) list — a
+  // Resolve the persisted pick against the (freshly scanned) list: a
   // stale id renders Default active and shows the revert notice, and is never
   // sent to the agent.
   const selectedModelId = selected
@@ -364,8 +364,8 @@ function AgentCard({
   const t = useT();
   const proto = PROTOCOL_KEY[agent.protocol];
   const gradient = VENDOR_GRADIENT[agent.vendor] ?? "from-[var(--ink)] to-[var(--ink-soft)]";
-  // #41: installed ≠ ready (ZCode). Amber ring + badge + one-line guidance
-  // instead of discovering the problem by hitting Generate.
+  // Installed is not the same as ready (ZCode). Amber ring + badge +
+  // one-line guidance, so the user learns it without hitting Generate.
   const notReady = agent.available && agent.ready === false;
   return (
     <button
@@ -433,7 +433,7 @@ function ModelPicker({
 }: {
   agent: AgentInfo;
   modelId: string;
-  /** #38: the persisted pick is gone from the list — render the revert notice. */
+  /** The persisted pick is gone from the list; render the revert notice. */
   stalePick?: boolean;
   onPick: (id: string) => void;
 }) {
@@ -459,7 +459,7 @@ function ModelPicker({
         </div>
         <div className="text-[10.5px] text-[var(--ink-mute)] max-w-[220px] text-right leading-snug">
           {agent.protocol === "argv-attach" ? (
-            // #41: ZCode has no --model flag — the hint must be truthful
+            // ZCode has no --model flag, so the hint must be truthful
             // about what Default does, not describe the sibling CLIs' flag.
             t("model.defaultHint.zcode")
           ) : (
@@ -883,8 +883,8 @@ function MarketplaceSection() {
         }),
       );
       // Drop the in-memory template registry cache AND push the fresh list
-      // to every mounted `useTemplates` consumer — the picker switches over
-      // immediately, no page reload. Failing here just means the picker
+      // to every mounted `useTemplates` consumer, so the picker switches over
+      // immediately with no page reload. Failing here just means the picker
       // keeps the previous list; the install itself already succeeded.
       await refreshTemplates().catch(() => undefined);
       await load();

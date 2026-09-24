@@ -4,7 +4,7 @@
 
 <p align="center"><b>Live page:</b> <a href="https://open-design.ai/html-anything/"><b>open-design.ai/html-anything/</b></a> — overview, surface modes, and showcase before you clone.</p>
 
-> **Markdown is the draft. HTML is what humans read. Your local agent writes it.** The agentic HTML editor — in the agentic era, you don't hand-edit docs anymore, so the output format should be what the reader actually wants: HTML. Local-first, zero API key, reuses the CLI session you already have logged in — **9 coding-agent CLIs** auto-detected on your `PATH` (Claude Code · Cursor Agent · Codex · Gemini CLI · GitHub Copilot CLI · OpenCode · Qwen Coder · Aider · IBM Bob), and **ZCode** (Electron app, auto-discovered via install path), driven by **75 composable skill templates** across **9 deliverable surfaces** (magazine articles · keynote decks · résumés · posters · Xiaohongshu cards · tweet cards · web prototypes · data reports · Hyperframes videos). One-click export to WeChat / X / Zhihu, or download `.html` / `.png`.
+> **Markdown is the draft. HTML is what humans read. Your local agent writes it.** The agentic HTML editor — in the agentic era, you don't hand-edit docs anymore, so the output format should be what the reader actually wants: HTML. Local-first, zero API key, reuses the CLI session you already have logged in — **9 coding-agent CLIs** auto-detected on your `PATH` (Claude Code · Cursor Agent · Codex · Gemini CLI · GitHub Copilot CLI · OpenCode · Qwen Coder · Aider · IBM Bob), and **ZCode** (its CLI ships inside the Electron app, found via the install path), driven by **75 composable skill templates** across **9 deliverable surfaces** (magazine articles · keynote decks · résumés · posters · Xiaohongshu cards · tweet cards · web prototypes · data reports · Hyperframes videos). One-click export to WeChat / X / Zhihu, or download `.html` / `.png`.
 
 <p align="center">
   <img src="docs/assets/banner.png" alt="HTML Anything — the agentic HTML editor, on your laptop" width="100%" />
@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square" /></a>
-  <a href="#supported-coding-agents"><img alt="Agents" src="https://img.shields.io/badge/agents-10-black?style=flat-square" /></a>
+  <a href="#supported-coding-agents"><img alt="Agents" src="https://img.shields.io/badge/agents-9%20CLIs-black?style=flat-square" /></a>
   <a href="#skills"><img alt="Skills" src="https://img.shields.io/badge/skills-75-orange?style=flat-square" /></a>
   <a href="#export-targets"><img alt="Export" src="https://img.shields.io/badge/export-WeChat%20%C2%B7%20X%20%C2%B7%20Zhihu%20%C2%B7%20PNG-9b59b6?style=flat-square" /></a>
   <a href="#quickstart"><img alt="Quickstart" src="https://img.shields.io/badge/quickstart-30%20seconds-green?style=flat-square" /></a>
@@ -203,7 +203,7 @@ On startup we scan `PATH` (including `~/.local/bin`, `~/.bun/bin`, `/opt/homebre
 | **Qwen Coder** | `qwen` | `qwen --yolo -` |
 | **Aider** | `aider` | `aider --no-pretty --no-stream --yes-always --message-file -` |
 | **IBM Bob** | `bob` | `bob --output-format stream-json --hide-intermediary-output` |
-| **ZCode** | `node` | `node <zcode.cjs> -p <guide> --attach <prompt.md> --output-format stream-json` (headless CLI one-shot; Electron app, discovered via install path) |
+| **ZCode** | `node` | `node <zcode.cjs> -p <guide> --attach <prompt.md> --output-format stream-json` (headless one-shot CLI inside the Electron app) |
 
 > The detection strategy and per-CLI adapter shape are borrowed directly from [`nexu-io/open-design`](https://github.com/nexu-io/open-design) and [`multica-ai/multica`](https://github.com/multica-ai/multica): one privileged process spawns CLIs, JSON-line is the wire protocol, every CLI gets a thin adapter in [`next/src/lib/agents/argv.ts`](next/src/lib/agents/argv.ts).
 
@@ -211,10 +211,10 @@ If you've already done `claude login` / `cursor login` / `gemini auth` in your t
 
 ### ZCode specifics
 
-- **Model selection follows the ZCode GUI.** The ZCode picker lists the model × reasoning-level chips of the plan currently selected in the ZCode desktop app; picking `Default` follows that plan's current default (the chip label names it). Switch plans in ZCode, then re-scan in Settings to refresh the list. Every turn is deterministically bound to the picked model — a broken binding refuses with an actionable error instead of silently rerouting.
-- **Attachment size cap.** The full prompt travels as an attached `.md` file; ZCode reads attachments up to **256 KB / 2000 lines** — longer input may be truncated.
-- **Per-turn cost follows your plugin config.** ZCode loads your plugins on every turn; a heavy setup measured ~100k extra input tokens and ~18 s per turn, and plugin artifacts may appear next to the output. Trim plugins on the ZCode side if turns feel slow — html-anything never writes ZCode's config.
-- **Sessions stay in ZCode.** Every generated session remains visible (and continuable) in the ZCode GUI — open the workspace matching the generation folder.
+- **Model selection follows the ZCode GUI** — The ZCode picker lists the models and reasoning levels of the plan selected in the desktop app; `Default` follows that plan's current default. Switch plans in ZCode, then re-scan in Settings; if the model binding breaks, generation fails with a clear error, and html-anything never quietly swaps models.
+- **Attachment size cap** — html-anything sends the full prompt as an attached `.md` file; ZCode reads up to **256 KB / 2000 lines** and truncates longer input.
+- **Per-turn cost follows your plugin config** — ZCode loads your plugins on every turn; we measured ~100k extra input tokens and ~18 s per turn on a heavy setup, and plugin artifacts may appear next to the output. Trim plugins on the ZCode side if turns run slow; html-anything writes exactly one thing to ZCode: a login-identity key in its credential store.
+- **Sessions stay in ZCode** — Every generated session remains in the ZCode GUI; open the workspace for that generation folder to continue it.
 
 ## Skills
 

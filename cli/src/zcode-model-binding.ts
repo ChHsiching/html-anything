@@ -1,83 +1,50 @@
 /**
- * Deterministic per-turn model binding for the ZCode CLI one-shot adapter
- * (model binding follows the ZCode GUI's selected plan).
+ * Per-turn model binding for the ZCode CLI one-shot adapter. The model
+ * binding follows the plan selected in the ZCode GUI.
  *
  * ZCode's CLI has no `--model` flag. A fresh `-p` session resolves its model
- * via `resolveInitialModelSelection` (packages/provider/src/
- * model-selection-config.ts in the ZCode source): the personal provider
- * config's `config.defaultModelSelection` wins when VALID; anything else —
- * including a missing reasoning level, which fails
- * `validateModelSelectionOptions` with `reasoning-level-missing` — silently
- * falls back to the FIRST visible registry provider with the LAST reasoning
- * variant (`values.at(-1)`, "构造最高档"). That fallback is unobservable from
- * outside and can route a turn to a provider the user never chose (live-verified:
- * a fresh turn landed on a custom WeChat gateway with
- * `reasoning_effort=max`, which that gateway rejects → ProviderBusinessError
- * 400, exit 1). Adapter-side pre-validation
- * is therefore the ONLY reliable defense: every turn binds
- * explicitly, and any broken link in the resolution chain refuses the spawn
- * with an actionable error instead of silently rerouting.
+ * from the personal provider config's `config.defaultModelSelection`. When
+ * that selection is absent or invalid, the CLI silently falls back to the
+ * first visible registry provider with the last reasoning variant, so a
+ * mis-bound turn reroutes to a provider the user never chose and fails at
+ * its gateway. To prevent that, every turn binds the model explicitly, and
+ * any broken link in the resolution chain refuses the spawn with an error
+ * that says what to fix.
  *
- * The binding mechanism (live-verified by probe provemodel.mjs + diag6, then
- * extended after the identity-bridge discovery — probe41-fix.mjs):
- * clone the user's `~/.zcode/v2/provider_config.json` to a temp file, write
- * the exact `config.defaultModelSelection` into the clone, and hand the child
- * the PAIRED env vars `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` (the clone) +
- * `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` (the same bundled catalog file we
- * validated against, so the validation view IS the runtime
- * view). The pairing is hard-required by the CLI
- * (packages/provider-node/src/runtime-paths.ts: setting exactly one of the two
- * throws "ZCode Built-in 与 Personal Provider Config 路径必须同时提供"; earlier
- * "single variable suffices" probe results were false positives from host env
- * pollution). The user's real config file is NEVER written — the clone is a
- * per-turn temp file owned by the invoke layer's cleanup.
+ * Binding mechanism (verified against the installed CLI): clone the user's
+ * `~/.zcode/v2/provider_config.json` to a temp file, write the exact
+ * `config.defaultModelSelection` into the clone, and hand the child the
+ * paired env vars `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` (the clone) and
+ * `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` (the bundled catalog file validated
+ * here, so the CLI reads the same catalog this module validated against).
+ * The pair is required by the CLI: passing only one of the two vars is
+ * rejected by its pair check (packages/provider-node/src/runtime-paths.ts).
+ * The user's real config file is never written. The clone is a per-turn
+ * temp file owned by the invoke layer's cleanup.
  *
- * On ZCode 3.14.3 that pair alone is NOT enough: the headless CLI materializes
- * an account Coding-Plan provider only when the credential store holds its
- * `account-provider:<providerId>:identity` key — which the GUI never writes
- * (only `zcode login` does; the GUI's desktop host pushes its account snapshot
- * through a different channel). Without it the plan provider is absent from
- * the registry, the selection is silently discarded, and the turn reroutes to
- * the first personal provider. The bridge: ensure that ONE key exists in the
- * REAL credential store — its value is the account id already embedded in the
- * GUI's own api-key key name, plaintext (decrypt() passes non-`enc:v1:` values
- * through), written as an ATOMIC ADD-ONLY append (no existing key is touched,
- * re-checked every turn, idempotent). A user who ran `zcode login` already has
- * the key and no write ever happens. This is the one deliberate exception to
- * the zero-user-write posture — chosen over redirecting ZCODE_DATA_BASE_DIR to
- * a temp clone (tried: correct binding but the whole data dir —
- * sessions, logs, plugin caches — moves and dies with the turn, GUI-invisible
- * and ~10x slower); a product cannot ask every user to run `zcode login`.
+ * The one real write is the identity bridge. The headless CLI materializes
+ * an account Coding-Plan provider only when the real credential store holds
+ * its `account-provider:<providerId>:identity` key, which the GUI never
+ * writes (only `zcode login` does). Without the key the CLI silently
+ * discards the selection and reroutes the turn. The bridge appends that key
+ * atomically: idempotent when the stored identity already matches, and a
+ * differing stale identity is overwritten. The account id comes from the
+ * account id embedded in the GUI's own api-key key name (plaintext;
+ * decrypt() passes non-`enc:v1:` values through). A user who ran
+ * `zcode login` already has the key and no write happens. Redirecting
+ * ZCODE_DATA_BASE_DIR to a temp clone was considered and rejected: it would
+ * keep zero user writes but lose GUI session visibility, cold-boot the
+ * plugin stack about 10x slower, and require every user to run
+ * `zcode login`.
  *
- * Read surface (all private ZCode formats):
- *   - `~/.zcode/v2/setting.json` — current keys `providerFamilyDomain` +
- *     `providerFamilyConnectionSelections`; legacy keys
- *     `modelProviderFamilySelectedKeys` (+ `modelProviderFamilyModes`) are the
- *     read-boundary FALLBACK only. Note the GUI RETAINS the legacy fields
- *     after its in-memory migration, so a fully current install can still
- *     present only legacy keys on disk — the fallback is the common case, not
- *     a rarity.
- *   - The bundled catalog next to the install (`<install>/resources/config/
- *     provider/zcode-builtin.json`, written by the same install as the
- *     zcode.cjs we spawn — version-consistent by construction; this is also
- *     exactly what the GUI host passes as ZCODE_BUILTIN_PROVIDER_CONFIG_FILE),
- *     with the runtime cache (`~/.zcode/v2/runtime/provider/<platform>/
- *     <version>/endpoint-…/zcode-builtin.json`) as a freshness-ordered second
- *     choice. schemaVersion must be 1.
- *   - `~/.zcode/v2/credentials.json` — KEY NAMES only (`oauth:<family>:
- *     access_token`) as the login signal for ready detection. Values are
- *     encrypted (Chromium safe-storage) and are never read.
- *
- * Catalog rule semantics mirror the ZCode engine
- * (packages/provider/src/config/model-config.ts): rules apply in array order
- * via overlay, so the LAST matching rule that specifies
- * `optionSpecs.reasoningLevel.values` wins; a rule matches when
- * `^(?:<modelMatch>)$` case-insensitively full-matches the model id. Known
- * divergence (documented): the GUI renders some plan models'
- * levels from a server-driven path (e.g. GLM-5.3 shows 低/高/最高 there) while
- * modelRules yield e.g. disabled/enabled — this module follows modelRules,
- * which is exactly what the CLI validates `defaultModelSelection` against, so
- * the adapter is self-consistent end to end.
+ * Files read (all private ZCode formats): `~/.zcode/v2/setting.json`
+ * (plan selection keys, legacy keys as read-boundary fallback), the bundled
+ * catalog next to the install (`<install>/resources/config/provider/
+ * zcode-builtin.json`, runtime cache as a freshness-ordered second choice;
+ * schemaVersion must be 1), and `~/.zcode/v2/credentials.json`. Only key
+ * names are read from credentials; the values are encrypted at rest
+ * (enc:v1 AES-256-GCM, key from ZCODE_CREDENTIAL_SECRET or a machine-local
+ * fallback) and are never read.
  */
 
 import {
@@ -90,7 +57,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-/** Narrow `unknown` to a plain JSON object (not null, not an array). */
+/** Narrow `unknown` to a plain JSON object: not null, not an array. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -105,7 +72,7 @@ export const ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV = "ZCODE_BUILTIN_PROVIDER_CO
 export type ZcodeFamily = "zai" | "bigmodel";
 /** The GUI's per-family connection choices (provider-family-connection-selection.ts). */
 export type ZcodePlanKind = "start-plan" | "individual-coding-plan" | "team-coding-plan";
-/** GUI family order (MODEL_PROVIDER_FAMILY_SPECS) — the deterministic tie-break. */
+/** GUI family order (MODEL_PROVIDER_FAMILY_SPECS), used as the tie-break. */
 const FAMILY_ORDER: readonly ZcodeFamily[] = ["zai", "bigmodel"];
 
 /** Why a detected install is not ready to run turns. */
@@ -122,9 +89,10 @@ export interface ZcodePlanSelection {
 /** One plan model with its reasoning-level chips (from modelRules). */
 export interface ZcodePlanModel {
   modelId: string;
-  /** `optionSpecs.reasoningLevel.values` of the last matching rule. May be empty
-   * when no rule specifies levels for the model — invoke then refuses (a
-   * reasoning model without a level fails CLI validation → silent fallback). */
+  /** `optionSpecs.reasoningLevel.values` of the last matching rule. May be
+   * empty when no rule specifies levels for the model; invoke then refuses
+   * because a reasoning model without a level fails CLI validation and
+   * silently falls back. */
   levels: string[];
 }
 
@@ -182,11 +150,11 @@ export function zcodePlanProviderId(family: ZcodeFamily, kind: ZcodePlanKind): s
 /**
  * Collect the per-family connection selections from a decoded setting.json.
  * Current keys win wholesale: when `providerFamilyConnectionSelections` is an
- * object it is the ONLY source (the GUI's own rule — "运行时代码不能再解释旧
- * 导航 key"); otherwise the legacy `modelProviderFamilySelectedKeys` pair is
+ * object it is the only source (the GUI's own rule, "运行时代码不能再解释旧
+ * 导航 key"). Otherwise the legacy `modelProviderFamilySelectedKeys` pair is
  * migrated, mirroring migrateLegacyAccountConnectionSettings (families whose
  * legacy mode is `apiKey` are not an account plan and are skipped). Returns an
- * empty map when no family resolves — callers treat that as the
+ * empty map when no family resolves; callers treat that as the
  * gui-keys-missing / not-logged-in link of the refusal chain. Pure; tolerant.
  */
 export function collectZcodeFamilySelections(setting: unknown): Map<ZcodeFamily, ZcodePlanKind> {
@@ -200,8 +168,8 @@ export function collectZcodeFamilySelections(setting: unknown): Map<ZcodeFamily,
       const kind = normalizePlanKind(entry.kind);
       if (!kind) continue;
       // team selections additionally need the three identity ids; a team entry
-      // without them is unusable for binding — skip it (tolerant, like the GUI
-      // schema which rejects rather than defaults them).
+      // without them is unusable for binding, so skip it (tolerant, like the
+      // GUI schema which rejects rather than defaults them).
       if (
         kind === "team-coding-plan" &&
         (!nonEmptyString(entry.productId) || !nonEmptyString(entry.organizationId) ||
@@ -245,19 +213,18 @@ function nonEmptyString(value: unknown): string | null {
 }
 
 /**
- * Resolve the ONE plan the adapter binds to.
+ * Resolve the one plan the adapter binds to.
  *
  * Family choice, mirroring the GUI's effective-domain semantics
  * (`providerFamilyDomain ?? derived-from-active-OAuth`):
  *   1. the persisted `providerFamilyDomain` when valid;
- *   2. else, among families WITH a selection, the single logged-in one
+ *   2. else, among families with a selection, the single logged-in one
  *      (credentials key names are the headless stand-in for "active OAuth");
  *   3. else the single selected family (covers logged-out detect: the plan is
  *      known, only the login is missing);
  *   4. else (domain absent, multiple selections, none/multiple logged in) the
- *      first family in the GUI's own family order — deterministic, and the
- *      rare corner it decides (two logins, no persisted domain) has no better
- *      headless signal.
+ *      first family in the GUI's own family order. That corner (two logins,
+ *      no persisted domain) has no better headless signal.
  * Returns `null` when no family has a usable selection at all.
  */
 export function parseZcodePlanSelection(
@@ -283,8 +250,10 @@ export function parseZcodePlanSelection(
 
 /**
  * Read the login signal from a decoded credentials.json: which families have
- * an `oauth:<family>:access_token` entry. Only KEY names are inspected — the
- * values are Chromium-safe-storage encrypted and unreadable headlessly.
+ * an `oauth:<family>:access_token` entry. Only key names are inspected. The
+ * values are encrypted at rest (enc:v1 AES-256-GCM, key from
+ * ZCODE_CREDENTIAL_SECRET or a machine-local fallback) and unreadable
+ * headlessly.
  */
 export function readZcodeLoggedInFamilies(credentials: unknown): Set<ZcodeFamily> {
   const out = new Set<ZcodeFamily>();
@@ -301,12 +270,12 @@ export interface ZcodeReadyState {
   ready: boolean;
   reason: ZcodeNotReadyReason | null;
   /** Resolved plan (present whenever the selection keys resolve, even when not
-   * logged in — so the refusal can name the plan). */
+   * logged in, so the refusal can name the plan). */
   plan: ZcodePlanSelection | null;
 }
 
 /**
- * Read setting.json + credentials.json and compute the detect surface's ready
+ * Read setting.json + credentials.json and compute the detect layer's ready
  * state. Never throws: missing/unreadable files degrade to the matching
  * not-ready reason. "未开过 GUI" (gui-not-initialized) = setting.json itself
  * absent; "未登录" (not-logged-in) = file present but no plan selection
@@ -348,9 +317,9 @@ function readJsonFile(filePath: string): unknown {
 /**
  * The bundled catalog written by the same install as the cjs we spawn:
  * `<install>/resources/config/provider/zcode-builtin.json` where the cjs is
- * `<install>/resources/glm/zcode.cjs` (Windows/macOS/.deb and the Linux
- * AppImage mount alike — the GUI host passes exactly this path, per
- * desktopProviderConfig.ts).
+ * `<install>/resources/glm/zcode.cjs`. Holds for Windows, macOS, .deb, and
+ * the Linux AppImage mount alike; the GUI host passes exactly this path
+ * (per desktopProviderConfig.ts).
  */
 export function zcodeBundledCatalogPathForCjs(cjsPath: string): string {
   return join(dirname(dirname(cjsPath)), "config", "provider", "zcode-builtin.json");
@@ -397,7 +366,7 @@ function isCatalogShape(data: unknown): boolean {
  * Locate + read the builtin catalog. Order: the install-bundled file
  * first (version-consistent with the spawned cjs by construction), then the
  * runtime cache by freshness (highest version dir, newest file within it).
- * Returns null when neither yields a schema-valid file — the
+ * Returns null when neither yields a schema-valid file; that is the
  * catalog-unreadable refusal link.
  */
 export function resolveZcodeCatalogFile(opts: {
@@ -437,7 +406,7 @@ export function resolveZcodeCatalogFile(opts: {
         const mtime = statSync(candidate).mtimeMs;
         if (!best || mtime > best.mtime) best = { path: candidate, mtime };
       } catch {
-        // unreadable candidate — skip
+        // unreadable candidate; skip
       }
     }
     if (best) {
@@ -448,7 +417,7 @@ export function resolveZcodeCatalogFile(opts: {
   return null;
 }
 
-/** ─── Plan model × level table from the catalog's rules ─── */
+/** ─── Plan model and level table from the catalog's rules ─── */
 
 interface RawProviderRule {
   providerId?: unknown;
@@ -464,12 +433,12 @@ interface RawModelRule {
  *
  * - model list: the providerRules entry's `config.builtinModelIds` (catalog
  *   display order = GUI order);
- * - enabled filter: `builtinProviderModelRules` entries — an explicit
+ * - enabled filter: `builtinProviderModelRules` entries. An explicit
  *   `config.enabled === false` disables; a missing entry leaves the model on
- *   (the rules table is an override table);
- * - levels per model: LAST modelRules rule (in array order, per the engine's
+ *   because the rules table is an override table;
+ * - levels per model: last modelRules rule (in array order, per the engine's
  *   overlay semantics) whose `^(?:modelMatch)$` case-insensitively
- *   full-matches the model id AND specifies
+ *   full-matches the model id and specifies
  *   `config.optionSpecs.reasoningLevel.values` as a non-empty string array.
  *   Invalid regexes are skipped (tolerant).
  * Pure; returns an empty models array for an unknown/empty provider.
@@ -563,7 +532,7 @@ function extractLevelValues(config: unknown): string[] | null {
 
 /**
  * Encode a (modelId, reasoningLevel) picker choice into the single string the
- * UI store persists and the invoke layer receives as `model` —
+ * UI store persists and the invoke layer receives as `model`:
  * `"<modelId>/<level>"`, the same slash-separated compound-id convention the
  * openclaw (`openrouter/anthropic/…`) and opencode (`anthropic/…`) pickers
  * use. Model ids in the catalog are `[-A-Za-z0-9.]`-shaped and contain no
@@ -589,12 +558,12 @@ export interface ZcodePlanModelOption {
 
 /**
  * Resolve the catalog for a resolved cjs + plan and expand the plan's models
- * into picker chips: one per model×level, ids encoded as
+ * into picker chips: one per model and level, ids encoded as
  * `"<modelId>/<level>"`, labels `"<modelId> (<level>)"`, every chip carrying
- * the plan providerId. Returns an empty list when the catalog is unreadable —
- * the caller keeps the static [DEFAULT_MODEL] floor and lets the invoke-time
- * refusal surface the actionable error. Shared by the next + cli detect
- * mirrors so the mapping cannot drift.
+ * the plan providerId. Returns an empty list when the catalog is unreadable;
+ * the caller keeps the static floor (ZCODE_DEFAULT_MODEL) and the invoke-time
+ * refusal reports the error. Shared by the next + cli detect mirrors so the
+ * mapping cannot drift.
  */
 export function readZcodePlanModelOptions(opts: {
   cjsPath: string;
@@ -614,7 +583,7 @@ export function readZcodePlanModelOptions(opts: {
 }
 
 /**
- * What the "Default" chip currently resolves to for this plan — the same
+ * What the "Default" chip currently resolves to for this plan. Uses the same
  * precedence {@link prepareZcodeModelBinding} applies to a default pick: the
  * GUI's own `defaultModelSelection` when it validly targets the plan (legacy
  * provider ids migrated), else the plan's first enabled model with its last
@@ -630,8 +599,8 @@ export interface ZcodePlanDefaultChoice {
 /**
  * Resolve {@link ZcodePlanDefaultChoice} for a resolved cjs + plan. Returns
  * `null` when the catalog is unreadable or the plan table holds no model with
- * a usable level — detect then keeps the generic default label and the
- * invoke-time refusal surfaces the actionable error.
+ * a usable level; detect then keeps the static floor and the invoke-time
+ * refusal reports the error.
  */
 export function readZcodePlanDefaultChoice(opts: {
   cjsPath: string;
@@ -681,21 +650,21 @@ export type ZcodeBindingResult =
     ok: true;
     /** The exact selection written into the clone (and returned for logging/tests). */
     selection: ZcodeModelSelection;
-    /** Path of the temp clone — its directory is the caller's to clean up. */
+    /** Path of the temp clone; its directory is the caller's to clean up. */
     clonePath: string;
-    /** The catalog file validated against == the paired builtin env value. */
+    /** The catalog file validated against, also the paired builtin env value. */
     builtinCatalogPath: string;
   }
   | {
     ok: false;
     code: ZcodeBindingRefusal;
-    /** Actionable message (English, matching sibling invoke errors). */
+    /** Failure message (English, matching sibling invoke errors). */
     message: string;
   };
 
 /**
  * `account-provider:coding-plan:${providerId}:account:${identity}:api-key`
- * (encodeURIComponent on the identity) — the GUI writes these.
+ * (encodeURIComponent on the identity); the GUI writes these.
  */
 const CODING_PLAN_APIKEY_PREFIX = "account-provider:coding-plan:";
 
@@ -717,41 +686,38 @@ function findCodingPlanApiKeyEntry(
 }
 
 /**
- * Resolve + WRITE the per-turn binding: the refusal chain, then TWO temp
- * artifacts — a clone of the user's personal provider config with the exact
- * `config.defaultModelSelection`, and a clone of the credentials store with a
- * plaintext `account-provider:<providerId>:identity` key bridged in. The
- * user's real files are never touched (zero-write contract,
- * snapshot-asserted in tests).
+ * Resolve + write the per-turn binding: the refusal chain, then one temp
+ * artifact, a clone of the user's personal provider config with the exact
+ * `config.defaultModelSelection`. The only write to real user files is the
+ * identity key appended to the real credential store (see header).
  *
- * The identity bridge is load-bearing (live-verified,
- * probe41-fix.mjs): the headless CLI materializes an account
- * Coding-Plan provider ONLY when the credential store holds its `identity`
- * key — a key the GUI never writes (only `zcode login` does) — and a provider
- * without it is absent from the registry, which makes our
- * defaultModelSelection unselectable and silently reroutes the turn to the
- * first personal provider. The bridge ensures that key exists in the REAL
- * credential store (atomic add-only append of the one key, re-checked every
- * turn; users who ran `zcode login` already have it and nothing is written).
- * Everything else in the store is untouched, so the turn keeps using the
- * real data dir — sessions stay visible in the ZCode GUI.
+ * The identity bridge is required (verified against the installed CLI).
+ * The headless CLI materializes an account Coding-Plan provider only when
+ * the credential store holds its `identity` key, a key the GUI never writes
+ * (only `zcode login` does). A provider without it is absent from the
+ * registry, which makes our defaultModelSelection unselectable and silently
+ * reroutes the turn to the first personal provider. The bridge ensures the
+ * key exists in the real credential store (atomic append of the one key,
+ * re-checked every turn; users who ran `zcode login` already have it and
+ * nothing is written). Everything else in the store is untouched, so the
+ * turn keeps using the real data dir and sessions stay visible in the
+ * ZCode GUI.
  *
- * `model` semantics: undefined / "default" binds the plan default — the GUI's
- * own `defaultModelSelection` when it targets the plan provider validly, else
- * the plan's first enabled model with its last level (the CLI's
- * `completeNewModelSelection` convention, `values.at(-1)`). Any OTHER string
- * is an explicit pick: it must decode to `"<modelId>/<level>"` AND validate
- * inside the plan, else the matching refusal fires — a bare/stale model id
- * (e.g. persisted by an older UI) never silently reroutes. Either way the
- * turn is deterministically bound — there is no path that leaves the CLI to
- * its silent registry fallback.
+ * `model` semantics: undefined / "default" binds the plan default, the GUI's
+ * own `defaultModelSelection` when it targets the plan provider validly,
+ * else the plan's first enabled model with its last level (the CLI's
+ * `completeNewModelSelection` convention, `values.at(-1)`). Any other string
+ * is an explicit pick: it must decode to `"<modelId>/<level>"` and validate
+ * inside the plan, else the matching refusal fires. A bare or stale model id
+ * (e.g. persisted by an older UI) never silently reroutes. Every turn is
+ * bound explicitly; no path leaves the CLI to its silent registry fallback.
  */
 export function prepareZcodeModelBinding(opts: {
   cjsPath: string;
   /** Picker id: undefined | "default" | "<modelId>/<level>". */
   model?: string;
-  /** Directory for the temp artifacts (the invoke layer's attach temp dir —
-   * its existing cleanup removes everything with the prompt file). */
+  /** Directory for the temp artifacts, the invoke layer's attach temp dir.
+   * Its existing cleanup removes everything with the prompt file. */
   attachDir: string;
   settingPath?: string;
   personalConfigPath?: string;
@@ -760,8 +726,8 @@ export function prepareZcodeModelBinding(opts: {
 }): ZcodeBindingResult {
   const setting = readJsonFile(opts.settingPath ?? defaultZcodeSettingPath());
   // The login signal participates in family resolution (domain-absent case) so
-  // the invoke layer resolves the SAME plan detect did — but it is NOT a
-  // refusal link here: an unlogged family fails at spawn (red error surface),
+  // the invoke layer resolves the same plan detect did, but it is not a
+  // refusal link here: an unlogged family fails at spawn (red error state),
   // while detect owns the amber not-ready state.
   const credentials = readJsonFile(opts.credentialsPath ?? defaultZcodeCredentialsPath());
   const plan = parseZcodePlanSelection(setting, readZcodeLoggedInFamilies(credentials));
@@ -795,9 +761,9 @@ export function prepareZcodeModelBinding(opts: {
     };
   }
 
-  // The identity bridge's raw material: the GUI-written coding-plan api-key
-  // key for the resolved plan provider. Absent → the headless registry cannot
-  // materialize the plan provider at all → refuse (actionable).
+  // Raw material for the identity bridge: the GUI-written coding-plan api-key
+  // key for the resolved plan provider. When absent, the headless registry
+  // cannot materialize the plan provider at all; refuse here.
   const credentialsRecord = isRecord(credentials) ? credentials : {};
   const apiKeyEntry = findCodingPlanApiKeyEntry(credentialsRecord, plan.providerId);
   if (!apiKeyEntry) {
@@ -812,10 +778,11 @@ export function prepareZcodeModelBinding(opts: {
   const selection = resolveSelection(opts.model, plan, planModels, personal);
   if (!selection.ok) return selection;
 
-  // Identity bridge on the REAL credential store: the headless registry needs
+  // Identity bridge on the real credential store: the headless registry needs
   // `account-provider:<providerId>:identity`; the GUI never writes it. Ensure
-  // it exists as an ATOMIC ADD-ONLY append (tmp file + rename; no existing
-  // key is touched; idempotent — already present means no write at all).
+  // it exists via an atomic append (tmp file + rename): idempotent when the
+  // stored identity already matches; a differing stale identity is
+  // overwritten.
   const identityKey = `account-provider:${plan.providerId}:identity`;
   if (credentialsRecord[identityKey] !== apiKeyEntry.identity) {
     const credentialsPath = opts.credentialsPath ?? defaultZcodeCredentialsPath();
@@ -873,11 +840,11 @@ function resolveSelection(
   personal: { config?: Record<string, unknown> },
 ): { ok: true; selection: ZcodeModelSelection } | { ok: false; code: ZcodeBindingRefusal; message: string } {
   if (model !== undefined && model !== "default") {
-    // An EXPLICIT pick must decode to "<modelId>/<level>" and validate inside
-    // the plan — anything else (a bare model id persisted by an older UI, a
-    // stale chip id after a plan change) REFUSES rather than silently binding
-    // the plan default. The silent-reroute class is exactly what this refusal exists
-    // to close.
+    // An explicit pick must decode to "<modelId>/<level>" and validate inside
+    // the plan. Anything else (a bare model id persisted by an older UI, a
+    // stale chip id after a plan change) refuses rather than silently binding
+    // the plan default; that closes the silent-reroute class this refusal
+    // exists for.
     const pick = decodeZcodeModelChoice(model);
     if (!pick) {
       return {
@@ -903,7 +870,7 @@ function resolveSelection(
     }
     return { ok: true, selection: { providerId: plan.providerId, modelId: entry.modelId, reasoningLevel: pick.reasoningLevel } };
   }
-  // Default: the shared precedence — the GUI's own defaultModelSelection when
+  // Default: the shared precedence. The GUI's own defaultModelSelection when
   // it validly targets this plan, else the plan default.
   const def = resolveDefaultSelection(plan, planModels, personal);
   if (!def) {
@@ -956,8 +923,8 @@ function resolveDefaultSelection(
   return { modelId: first.modelId, reasoningLevel: first.levels[first.levels.length - 1]! };
 }
 
-/** True when the environment already carries BOTH provider-config vars — the
- * user's zero-code reroute. The invoke layer then passes them through
+/** True when the environment already carries both provider-config vars; that
+ * is the user's zero-code reroute. The invoke layer then passes them through
  * untouched and skips its own binding. */
 export function zcodeProviderEnvPairSet(env: Readonly<NodeJS.ProcessEnv>): boolean {
   const personal = env[ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]?.trim();

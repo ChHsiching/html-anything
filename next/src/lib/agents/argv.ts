@@ -23,7 +23,7 @@ export class UnsupportedAgentProtocolError extends Error {
 /**
  * The fixed short guide ZCode's `-p` flag carries. The attachment holds the
  * real task, so this only points the model at it and pins the deliverable
- * shape (final HTML as the reply body — ZCode is agentic and would otherwise
+ * shape (final HTML as the reply body; ZCode is agentic and would otherwise
  * reach for file-write tools). Keep it short: `-p` takes an argv value.
  */
 const ZCODE_PROMPT_GUIDE =
@@ -136,13 +136,13 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
       // spawn time, so we leave the trailing slot empty here.
       return ["exec", "--auto", ...(model ? ["--model", model] : [])];
     case "zcode":
-      // Headless one-shot. `-p` carries ONLY this fixed short guide — the
+      // Headless one-shot. `-p` carries only this fixed short guide; the
       // full prompt (shared directives + template + user content, 20-30KB+)
-      // travels in the `--attach` temp file invoke.ts writes; argv length
-      // limits would truncate it. `--mode yolo` is `-p`'s default anyway;
-      // passing it is self-documentation. There is no `--model` flag: the
-      // model default comes from ZCode's own provider config (opts.model is
-      // deliberately ignored).
+      // travels in the `--attach` temp file invoke.ts writes, since argv
+      // length limits would truncate it. `--mode yolo` is `-p`'s default
+      // anyway; passing it is self-documentation. There is no `--model`
+      // flag: the model default comes from ZCode's own provider config
+      // (opts.model is deliberately ignored).
       return [
         "-p",
         ZCODE_PROMPT_GUIDE,
@@ -169,10 +169,10 @@ export function envFor(agent: string): NodeJS.ProcessEnv {
   const base = { ...process.env };
   if (agent === "gemini") base.GEMINI_CLI_TRUST_WORKSPACE = "true";
   // ZCode's zcode.cjs is an Electron-hosted bundle; without
-  // ELECTRON_RUN_AS_NODE=1 it boots the full Electron app instead of the CLI
-  // and the prompt is never executed (live-proven). Merged INTO the env (not
+  // ELECTRON_RUN_AS_NODE=1 it boots the full Electron app rather than the CLI
+  // and the prompt is never executed (verified). Merged into the env (not
   // a replacement) so PATH, ZCODE_*, and the provider-config escape-hatch
-  // vars survive. Scoped to zcode — other agents must not inherit it.
+  // vars survive. Scoped to zcode; other agents must not inherit it.
   if (agent === "zcode") base.ELECTRON_RUN_AS_NODE = "1";
   return base;
 }
@@ -199,7 +199,7 @@ export type AgentParse =
 /**
  * Cross-line state that the parser carries between calls. Currently used to
  * dedupe text deltas: when an agent emits both fine-grained `stream_event`
- * `text_delta` blocks AND a final `assistant` message containing the same
+ * `text_delta` blocks and a final `assistant` message containing the same
  * text concatenated, we keep the streamed tokens and skip the assistant
  * message body. Without this dedupe, every Claude/Cursor/Gemini/Qoder run
  * with `--include-partial-messages` (or the equivalent) writes its output
@@ -216,7 +216,7 @@ export type ParseState = {
    * ZCode: toolCallId → toolName, filled when the `model.streaming`
    * tool_call event names the tool. `tool.updated` result events carry only a
    * toolCallId, so the "工具 X 完成" status line resolves the name through
-   * this map — a result whose id maps to nothing emits no line at all
+   * this map; a result whose id maps to nothing emits no line at all
    * (a nameless status line is noise).
    */
   zcodeToolNamesById?: Map<string, string>;
@@ -224,7 +224,7 @@ export type ParseState = {
 
 /**
  * Build a stateful per-invocation parser. Feed every stdout line through the
- * returned function — it carries the cross-line state needed for dedupe.
+ * returned function; it holds the cross-line state needed for dedupe.
  */
 export function makeParser(agent: string): (line: string) => AgentParse[] {
   const state: ParseState = {};
@@ -249,7 +249,7 @@ export function parseLine(agent: string, line: string): AgentParse[] {
  * or its input has no usable content field.
  *
  * Module-internal: shared by the agent parse cases below. (The cli mirror
- * keeps its own internal copy — the two files are adapted copies by repo
+ * keeps its own internal copy; the two files are adapted copies by repo
  * convention, not verbatim mirrors.)
  */
 function rescueHtmlFromToolUse(
@@ -295,38 +295,25 @@ function rescueHtmlFromToolUse(
  *
  *   {"eventId":…,"payload":{…},"seq":…,"sessionId":…,"timestamp":…,"type":"model.streaming"}
  *
- * Event surface (types observed live + pinned in the ZCode open-source
- * contracts, apps/zcode-cli/packages/contracts/src/events/session.events.ts):
+ * Events that produce output, dispatched on `type` (set pinned in the
+ * ZCode open-source contracts,
+ * apps/zcode-cli/packages/contracts/src/events/session.events.ts):
+ *  - `model.streaming`, dispatched on `payload.kind`: text_delta → delta;
+ *    reasoning_delta → thinking meta (same `thinking` key as the Claude
+ *    path); tool_call → rescue a file-write tool's input HTML, else a status
+ *    line (records toolCallId→toolName for the nameless result event); the
+ *    start/end/finish kinds emit nothing.
+ *  - `tool.updated`, only kind `result`: "工具 X 完成" with the name resolved
+ *    via the tool_call map.
+ *  - `turn.completed`: usage (snake_case remap), duration, resultType; the
+ *    only place usage is emitted.
+ *  - `turn.failed` → error part. `result` → bare terminator (sessionId meta;
+ *    its usage repeats turn.completed and is not re-emitted).
  *
- *  - `model.streaming` — the model's own stream, dispatched on `payload.kind`:
- *      text_delta → streamed text (delta channel)
- *      reasoning_delta → thinking meta, forwarded fragment by fragment under
- *        the same `thinking` key the Claude path emits
- *      tool_call → the fully-assembled tool invocation ({toolCallId,
- *        toolName, input}). A file-write tool's input may hold the generated
- *        HTML — run the shared rescue; otherwise surface a natural-language
- *        status line so the stream keeps flowing during the tool window.
- *        Records toolCallId→toolName for the result event, which is nameless.
- *      (start/text_start/text_end/reasoning_start/reasoning_end/
- *       tool_input_start/tool_input_delta/tool_input_end/finish → no output)
- *  - `tool.updated` — tool execution lifecycle, dispatched on an injected
- *      `payload.kind` (scheduled/started/progress/result/error/batch). Only
- *      `result` matters here: emit "工具 X 完成" with the name resolved via
- *      the tool_call map. A nameless result emits nothing — a bare ✓ with no
- *      context is worse than no line at all.
- *  - `turn.completed` — end of turn: usage (remapped to the snake_case keys
- *      the consumer reads), duration, and resultType ("success",
- *      "cancelled", …). This is the ONLY place usage is emitted.
- *  - `turn.failed` — turn-level failure (payload.error.message) → error part.
- *  - `result` — the bare terminator line (top-level fields, no payload
- *      envelope). Carries the sessionId (→ session meta). Its usage is the
- *      SAME cumulative numbers turn.completed already reported — never emit
- *      it again.
- *  - everything else — session.titleUpdated / session.resumed /
- *      session.updated (20+ plugin hook descriptors per turn), turn.started,
- *      message.upserted, the permission / checkpoint families, … — noise,
- *      dropped. So are non-JSON lines: ZCode plugins can print arbitrary
- *      stdout.
+ * Everything else (session.titleUpdated / session.resumed / session.updated
+ * plugin-hook frames, turn.started, message.upserted, permission /
+ * checkpoint families, …) is noise and dropped; so are non-JSON lines (ZCode
+ * plugins can print arbitrary stdout).
  */
 function parseZcodeLine(line: string, state: ParseState): AgentParse[] {
   let parsed: unknown;
@@ -356,9 +343,9 @@ function parseZcodeLine(line: string, state: ParseState): AgentParse[] {
       if (id && name) {
         (state.zcodeToolNamesById ??= new Map()).set(id, name);
       }
-      // A file-write tool call may carry the generated HTML; reuse the same
+      // A file-write tool call may hold the generated HTML; reuse the same
       // rescue logic the other adapters apply to Claude-style tool_use
-      // blocks (ZCode's Write tool is {file_path, content} — same shape).
+      // blocks (ZCode's Write tool is {file_path, content}, same shape).
       const html = rescueHtmlFromToolUse([{ type: "tool_use", name, input: payload.input }]);
       if (html) return [{ kind: "html", text: html }];
       if (name) return [{ kind: "meta", key: "status", value: `调用工具 ${name}` }];
@@ -429,11 +416,11 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
     return [{ kind: "delta", text: trimmed.endsWith("\n") ? trimmed : trimmed + "\n" }];
   }
 
-  // ZCode (argv-attach) — NDJSON event envelope, one JSON object per line:
+  // ZCode (argv-attach), NDJSON event envelope, one JSON object per line:
   //   {"type":"model.streaming","payload":{"kind":"text_delta","delta":"…"},…}
   // plus a bare {"type":"result",…} terminator line. See parseZcodeLine for
-  // the full event surface. Handled before the shared JSON.parse so a
-  // non-JSON line returns [] here instead of a `noise` part (the invoke
+  // the full event set. Handled before the shared JSON.parse so a
+  // non-JSON line returns [] here rather than a `noise` part (the invoke
   // layer forwards noise as `raw`, which would flood the log panel).
   if (agent === "zcode") {
     return parseZcodeLine(trimmed, state);

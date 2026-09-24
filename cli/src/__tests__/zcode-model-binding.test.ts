@@ -1,9 +1,9 @@
 // Unit tests for the per-turn model binding: plan
 // selection from the GUI settings (current keys + legacy fallback), catalog
-// resolution (install-bundled first, cache by freshness), the model×level
-// table from modelRules, the four-link refusal chain, the temp-clone write
+// resolution (install-bundled first, cache by freshness), the model and level
+// table from modelRules, the six-link refusal chain, the temp-clone write
 // with the zero-write contract on the user's real config, and the
-// live-proven binding discriminator.
+// verified binding discriminator.
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,9 +32,9 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// ─── Shared fixture shapes (mirroring the live install's files) ─────────────
+// ─── Shared fixture shapes (mirroring the install's files) ─────────────
 
-/** Live-captured legacy setting.json shape (ZCode 3.14.3 that
+/** Captured legacy setting.json shape (ZCode 3.14.3 that
  * migrated in-memory but retained the legacy fields on disk). */
 const LEGACY_SETTING = {
   modelProviderFamilyModes: { zai: "oauth", bigmodel: "oauth" },
@@ -52,7 +52,7 @@ const MODERN_SETTING = {
   },
 };
 
-/** Minimal catalog with the REAL rule shapes from the install's
+/** Minimal catalog with the real rule shapes from the install's
  * zcode-builtin.json: `.*` base rule, a GLM-5.2-specific rule whose values
  * must override the base (array-order overlay), and one disabled model entry. */
 function catalogFixture(): Record<string, unknown> {
@@ -102,9 +102,9 @@ function personalConfigFixture(extraConfig: Record<string, unknown> = {}): Recor
   return {
     schemaVersion: 1,
     config: {
-      providerOrder: ["new-provider", "deepseek", "42c7e100-ae54-4b64-8d9d-45ae140c57db"],
+      providerOrder: ["new-provider", "deepseek", "00000000-1111-4222-8333-444444444444"],
       providerRules: [
-        { providerId: "42c7e100-ae54-4b64-8d9d-45ae140c57db", providerName: "custom gateway", config: { access: { type: "api-key", apiKey: "sk-x" } } },
+        { providerId: "00000000-1111-4222-8333-444444444444", providerName: "custom gateway", config: { access: { type: "api-key", apiKey: "sk-x" } } },
       ],
       ...extraConfig,
     },
@@ -120,7 +120,7 @@ describe("collectZcodeFamilySelections", () => {
     expect(selections.get("bigmodel")).toBe("individual-coding-plan");
   });
 
-  it("modern keys win wholesale — legacy fields are ignored when present", () => {
+  it("modern keys win wholesale; legacy fields are ignored when present", () => {
     const setting = {
       ...LEGACY_SETTING,
       providerFamilyConnectionSelections: { bigmodel: { kind: "team-coding-plan", productId: "p", organizationId: "o", projectId: "j" } },
@@ -190,8 +190,8 @@ describe("parseZcodePlanSelection", () => {
 
   it("domain absent + single selected family → that family (even logged out)", () => {
     const plan = parseZcodePlanSelection(LEGACY_SETTING, new Set());
-    // zai AND bigmodel are both selected here — with no login signal the GUI's
-    // family order decides; with exactly one login it wins instead.
+    // zai AND bigmodel are both selected here; with no login signal the GUI's
+    // family order decides, and with exactly one login it wins instead.
     expect(plan!.family).toBe("zai");
     const loggedIn = parseZcodePlanSelection(LEGACY_SETTING, new Set(["bigmodel" as const]));
     expect(loggedIn!.family).toBe("bigmodel");
@@ -215,7 +215,7 @@ describe("parseZcodePlanSelection", () => {
 });
 
 describe("readZcodeLoggedInFamilies / readZcodeReadyState", () => {
-  it("only oauth:<family>:access_token KEY NAMES count as the login signal", () => {
+  it("only oauth:<family>:access_token key names count as the login signal", () => {
     const families = readZcodeLoggedInFamilies({
       "oauth:bigmodel:access_token": "enc:xxx",
       "oauth:bigmodel:user_info": "enc:xxx",
@@ -341,7 +341,7 @@ describe("resolveZcodeCatalogFile", () => {
   });
 });
 
-// ─── Model × level table ────────────────────────────────────────────────────
+// ─── Model and level table ──────────────────────────────────────────────────
 
 describe("parseZcodeCatalogPlan", () => {
   it("last matching modelRules rule wins (array-order overlay, case-insensitive full match)", () => {
@@ -356,7 +356,7 @@ describe("parseZcodeCatalogPlan", () => {
     const catalog = catalogFixture() as {
       config: { modelConfigRules: { builtinProviderModelRules: Array<Record<string, unknown>> } };
     };
-    // GLM-5.3 has an explicit enabled:true entry; drop it entirely — the model
+    // GLM-5.3 has an explicit enabled:true entry; drop it entirely; the model
     // must stay listed (rules are an override table).
     catalog.config.modelConfigRules.builtinProviderModelRules =
       catalog.config.modelConfigRules.builtinProviderModelRules.filter(
@@ -381,7 +381,7 @@ describe("picker id codec", () => {
     expect(decodeZcodeModelChoice(id)).toEqual({ modelId: "GLM-5.2", reasoningLevel: "high" });
   });
 
-  it("rejects ids without a level suffix (plain model ids are NOT valid picks)", () => {
+  it("rejects ids without a level suffix (plain model ids are not valid picks)", () => {
     expect(decodeZcodeModelChoice("GLM-5.2")).toBeNull();
     expect(decodeZcodeModelChoice("default")).toBeNull();
     expect(decodeZcodeModelChoice("/high")).toBeNull();
@@ -390,7 +390,7 @@ describe("picker id codec", () => {
 });
 
 describe("readZcodePlanModelOptions (detect-surface composition)", () => {
-  it("expands the plan's models into model×level chips with encoded ids", () => {
+  it("expands the plan's models into model/level chips with encoded ids", () => {
     const dir = mkdtempSync(join(tmpdir(), "zcode-plan-options-"));
     try {
       const install = join(dir, "install");
@@ -412,7 +412,7 @@ describe("readZcodePlanModelOptions (detect-surface composition)", () => {
         { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
         { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
       ]);
-      // Unreadable catalog → empty chips (caller keeps the DEFAULT floor).
+      // Unreadable catalog → empty chips (caller keeps the static floor).
       rmSync(join(install, "resources", "config", "provider", "zcode-builtin.json"), { force: true });
       expect(readZcodePlanModelOptions({ cjsPath: cjs, plan: plan!, cacheRoot: join(dir, "no-cache") })).toEqual([]);
     } finally {
@@ -442,7 +442,7 @@ describe("readZcodePlanDefaultChoice (Default-chip label source)", () => {
     return { dir, cjs, personalPath };
   }
 
-  it("no configured default → plan's first enabled model + LAST level (same precedence as a default pick)", () => {
+  it("no configured default → plan's first enabled model + last level (same precedence as a default pick)", () => {
     const f = defaultChoiceTree();
     try {
       const plan = parseZcodePlanSelection(MODERN_SETTING);
@@ -470,7 +470,7 @@ describe("readZcodePlanDefaultChoice (Default-chip label source)", () => {
     }
   });
 
-  it("a configured default targeting ANOTHER provider → plan default (label never promises a foreign provider)", () => {
+  it("a configured default targeting another provider → plan default (label never promises a foreign provider)", () => {
     const f = defaultChoiceTree({
       defaultModelSelection: { providerId: "deepseek", modelId: "deepseek-chat", options: { reasoningLevel: "high" } },
     });
@@ -569,7 +569,7 @@ describe("prepareZcodeModelBinding", () => {
     writeFileSync(personalPath, JSON.stringify(personalConfigFixture(extraPersonalConfig)));
     // Mirrors the GUI-written credential keys: an oauth login token plus the
     // coding-plan api-key key the identity bridge derives from (values are
-    // opaque — only KEY NAMES matter to the adapter).
+    // opaque; only key names matter to the adapter).
     const credentialsPath = join(dir, "credentials.json");
     writeFileSync(credentialsPath, JSON.stringify({
       "oauth:bigmodel:access_token": "enc:v1:fake",
@@ -581,7 +581,7 @@ describe("prepareZcodeModelBinding", () => {
     return { cjs, settingPath, personalPath, credentialsPath, attachDir };
   }
 
-  it("explicit pick: writes the exact selection into a temp clone; the real config file is UNTOUCHED (zero-write snapshot)", () => {
+  it("explicit pick: writes the exact selection into a temp clone; the real config file is untouched (zero-write snapshot)", () => {
     const f = fixtureTree();
     const before = readFileSync(f.personalPath, "utf8");
     const credsFixture = JSON.parse(readFileSync(f.credentialsPath, "utf8")) as Record<string, string>;
@@ -613,15 +613,15 @@ describe("prepareZcodeModelBinding", () => {
       options: { reasoningLevel: "high" },
     });
     // The clone keeps the rest of the personal config (provider rules ride along).
-    expect(clone.config.providerOrder).toEqual(["new-provider", "deepseek", "42c7e100-ae54-4b64-8d9d-45ae140c57db"]);
-    // ZERO-WRITE contract: the user's real file is byte-identical.
+    expect(clone.config.providerOrder).toEqual(["new-provider", "deepseek", "00000000-1111-4222-8333-444444444444"]);
+    // Zero-write contract: the user's real file is byte-identical.
     expect(readFileSync(f.personalPath, "utf8")).toBe(before);
 
-    // Identity bridge: the REAL credential store gains EXACTLY the
+    // Identity bridge: the real credential store gains exactly the
     // one identity key (plaintext, derived from the GUI's own api-key key
-    // name — the headless registry materializes account providers only with
+    // name; the headless registry materializes account providers only with
     // it); every pre-existing key and value is untouched, and a second
-    // preparation with the key already present writes NOTHING (idempotent).
+    // preparation with the key already present writes nothing (idempotent).
     const credsAfter = JSON.parse(readFileSync(f.credentialsPath, "utf8")) as Record<string, string>;
     expect(credsAfter).toEqual({
       ...credsFixture,
@@ -680,7 +680,7 @@ describe("prepareZcodeModelBinding", () => {
     expect(result.message).toContain("log in to your Coding Plan");
   });
 
-  it("default pick without a configured default → plan's first model + LAST level (completeNewModelSelection convention)", () => {
+  it("default pick without a configured default → plan's first model + last level (completeNewModelSelection convention)", () => {
     const f = fixtureTree();
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
@@ -724,7 +724,7 @@ describe("prepareZcodeModelBinding", () => {
     });
   });
 
-  it("a configured default targeting ANOTHER provider falls back to the plan default", () => {
+  it("a configured default targeting another provider falls back to the plan default", () => {
     const f = fixtureTree({
       defaultModelSelection: { providerId: "deepseek", modelId: "deepseek-chat", options: { reasoningLevel: "high" } },
     });
@@ -803,7 +803,7 @@ describe("prepareZcodeModelBinding", () => {
     expect(result).toMatchObject({ ok: false, code: "level-unavailable" });
   });
 
-  it("a BARE model id (pre-#41 persisted pick, no level suffix) REFUSES — never silently binds the default", () => {
+  it("a bare model id (legacy persisted pick, no level suffix) refuses; the default is never bound silently", () => {
     const f = fixtureTree();
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
@@ -820,26 +820,20 @@ describe("prepareZcodeModelBinding", () => {
   });
 });
 
-// ─── The live-proven binding discriminator ────────────────────────────────
+// ─── The binding discriminator ────────────────────────────────────────
 //
-// On the probe host (installed ZCode 3.14.1, CLI bundle 0.16.9) the two arms
-// of the discriminator were live-verified:
-//   WRONG binding (fresh session, no explicit defaultModelSelection): the
-//   CLI's silent registry-fallback picked the FIRST visible provider — the
-//   custom WeChat gateway 42c7e100-… — with reasoning 'max' (values.at(-1)),
-//   whose gateway answers 400 → exit 1. Captured verbatim below.
-//   RIGHT binding (temp clone + defaultModelSelection targeting the plan):
-//   exit 0, PROBE_OK (probe provemodel.mjs + diag6.cjs).
-// The adapter's written selection must therefore ALWAYS be a plan-provider
-// triple with an explicit level — the shape the success arm proved.
+// A mis-bound fresh turn silently reroutes to the first personal provider and
+// fails at its gateway (ProviderBusinessError 400, exit 1); a correctly bound
+// turn completes (resultType success, exit 0). Both arms are pinned below
+// with fixtures captured from real CLI runs.
 
-describe("binding discriminator (live-verified)", () => {
+describe("binding discriminator (verified)", () => {
   const wrongBindingStderr = readFileSync(
     join(here, "__fixtures__", "zcode-wrong-binding.stderr.txt"),
     "utf8",
   );
   // The exit-0 arm's captured evidence: the turn.completed + result lines of
-  // the diag6 run that completed under the paired redirect.
+  // a run that completed under the paired redirect.
   const rightBindingStdout = readFileSync(
     join(here, "__fixtures__", "zcode-right-binding.stdout.jsonl"),
     "utf8",
@@ -848,7 +842,7 @@ describe("binding discriminator (live-verified)", () => {
   it("the wrong-binding evidence: gateway 400 on reasoning_effort='max' routed to a non-plan provider", () => {
     expect(wrongBindingStderr).toContain("providerCode: 400");
     expect(wrongBindingStderr).toContain("'input': 'max'");
-    expect(wrongBindingStderr).toContain("providerId: '42c7e100-ae54-4b64-8d9d-45ae140c57db'");
+    expect(wrongBindingStderr).toContain("providerId: '00000000-1111-4222-8333-444444444444'");
   });
 
   it("the right-binding evidence: a bound turn completes (resultType success, exit 0)", () => {
@@ -862,7 +856,7 @@ describe("binding discriminator (live-verified)", () => {
     expect(result?.response).toBe("PROBE_OK");
   });
 
-  it("the binding we write is the proven-good shape: plan provider + explicit level, never the fallback provider", () => {
+  it("the binding we write is the verified-good shape: plan provider + explicit level, never the fallback provider", () => {
     const dir = mkdtempSync(join(tmpdir(), "zcode-discriminator-"));
     try {
       const install = join(dir, "install");
@@ -875,11 +869,11 @@ describe("binding discriminator (live-verified)", () => {
         JSON.stringify(catalogFixture()),
       );
       const settingPath = join(dir, "setting.json");
-      // The probe machine's actual state: legacy keys + bigmodel logged in
+      // A captured machine state: legacy keys + bigmodel logged in
       // (credentials key names are the login signal that resolves the family).
       writeFileSync(settingPath, JSON.stringify(LEGACY_SETTING));
       const credentialsPath = join(dir, "credentials.json");
-      // Probe machine truth: bigmodel login + the GUI-written coding-plan
+      // Captured credentials: bigmodel login + the GUI-written coding-plan
       // api-key key (the identity bridge's raw material).
       writeFileSync(credentialsPath, JSON.stringify({
         "oauth:bigmodel:access_token": "enc:x",
@@ -892,7 +886,7 @@ describe("binding discriminator (live-verified)", () => {
 
       const result = prepareZcodeModelBinding({
         cjsPath: cjs,
-        // The exact picker choice the success arm proved: GLM-5.2 at 'high'.
+        // The picker choice the success arm exercised: GLM-5.2 at 'high'.
         model: encodeZcodeModelChoice("GLM-5.2", "high"),
         attachDir,
         settingPath,
@@ -902,12 +896,12 @@ describe("binding discriminator (live-verified)", () => {
       });
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      // The proven-good triple (probe temp-provider-config.json, exit 0)…
+      // The verified-good triple (exit 0)…
       expect(result.selection.providerId).toBe("account:bigmodel-individual-coding-plan");
       expect(result.selection.modelId).toBe("GLM-5.2");
       expect(result.selection.reasoningLevel).toBe("high");
       // …and never the 400-ing fallback provider from the stderr fixture.
-      expect(result.selection.providerId).not.toBe("42c7e100-ae54-4b64-8d9d-45ae140c57db");
+      expect(result.selection.providerId).not.toBe("00000000-1111-4222-8333-444444444444");
       expect(wrongBindingStderr).not.toContain(result.selection.providerId);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -916,7 +910,7 @@ describe("binding discriminator (live-verified)", () => {
 });
 
 describe("zcodeProviderEnvPairSet", () => {
-  it("true only when BOTH provider-config vars are set (user's zero-code reroute)", () => {
+  it("true only when both provider-config vars are set (user's zero-code reroute)", () => {
     expect(
       zcodeProviderEnvPairSet({
         [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: "/tmp/a.json",

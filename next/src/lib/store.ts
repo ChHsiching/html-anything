@@ -7,7 +7,7 @@ import { deleteTaskRuns, putRun } from "@/lib/history/db";
 
 /**
  * A model picker entry. Mirrors the server-side ModelOption in
- * `lib/agents/detect.ts`. `providerId` is ZCode-only (#41): the plan chips
+ * `lib/agents/detect.ts`. `providerId` is ZCode-only: the plan chips
  * carry the GUI-selected plan's catalog provider for the per-turn binding.
  * Absent for every other agent.
  */
@@ -26,9 +26,9 @@ export type AgentInfo = {
   /** True for ACP / pi-rpc adapters where Convert returns a friendly error. */
   unsupported?: boolean;
   /**
-   * ZCode-only (#41): installed ≠ ready — true when the GUI plan resolves and
-   * its family is logged in. False + notReadyReason renders the amber
-   * "已安装 · 未就绪" card state. Absent for every other agent.
+   * ZCode-only: installed is not the same as ready. True when the GUI plan
+   * resolves and its family is logged in. False + notReadyReason renders the
+   * amber "已安装 · 未就绪" card state. Absent for every other agent.
    */
   ready?: boolean;
   notReadyReason?: import("./agents/zcode-model-binding").ZcodeNotReadyReason;
@@ -84,9 +84,9 @@ export type Task = {
   status: ConvertStatus;
   log: LogEntry[];
   stats: RunStats;
-  // sample-derived fields — when populated, the next convert switches to
+  // sample-derived fields: when populated, the next convert switches to
   // diff-edit mode and asks the agent to make minimal changes to baseHtml
-  // instead of regenerating from scratch.
+  // rather than regenerating from scratch.
   baseContent?: string;
   baseHtml?: string;
   /** id of the source sample (if any), so the gallery can mark it loaded */

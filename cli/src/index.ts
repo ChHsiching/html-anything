@@ -713,7 +713,7 @@ function handleAgents(): void {
       : "✗";
     const isDefault = a.id === config.defaultAgent ? " (default)" : "";
     console.log(`  ${status} ${a.id} — ${a.label} (${a.vendor})${isDefault}`);
-    // #41: ZCode installed ≠ ready — print the actionable guidance line too.
+    // ZCode installed is not the same as ready; print the guidance line too.
     if (a.available && a.ready === false) {
       console.log(
         a.notReadyReason === "gui-not-initialized"

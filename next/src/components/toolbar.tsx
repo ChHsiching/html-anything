@@ -27,7 +27,7 @@ export function Toolbar({
   const t = useT();
 
   const agentInfo = agents.find((a) => a.id === agent);
-  // #38: a stale persisted pick falls back to Default instead of being sent.
+  // A stale persisted pick falls back to Default and is never sent on.
   const model = agent ? resolveAgentModel(agentInfo?.models, agentModels[agent]) : "default";
 
   return (

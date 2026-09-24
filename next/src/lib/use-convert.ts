@@ -65,7 +65,7 @@ export function useConvert() {
       // diff-edit mode: if the task was loaded from a sample (or the user has
       // already converted once) AND the content has actually changed, we ship
       // the previous (baseContent, baseHtml) so the API can ask the agent for
-      // minimal edits instead of a fresh regeneration. This preserves the
+      // minimal edits rather than a fresh regeneration. This preserves the
       // design system AND saves output tokens.
       const task = store.tasks.find((t) => t.id === taskId);
       const isEdit =
@@ -113,8 +113,8 @@ export function useConvert() {
         const dec = new TextDecoder();
         let buf = "";
         let lastEvent = "";
-        // #41 zcode gate: a refused binding / failed turn must end the task in
-        // the RED error state, not a fake-green "done". Other agents keep the
+        // zcode gate: a refused binding / failed turn must end the task in
+        // red error state, not a fake-green "done". Other agents keep the
         // historical behavior (their CLIs may exit non-zero after usable
         // output; html-anything does not re-interpret them here).
         let turnFailed = false;
@@ -151,8 +151,8 @@ export function useConvert() {
         useStore.getState().patchStatsFor(taskId, { endedAt, durationMs: endedAt - startedAt });
         useStore.getState().setStatusFor(taskId, turnFailed ? "error" : "done");
         // record the just-finished (content, html) as the new diff-edit baseline
-        // so the user's next edit goes through diff mode instead of full regen
-        // (never on a failed turn — the partial output is not a baseline)
+        // so the user's next edit goes through diff mode rather than a full regen
+        // (never on a failed turn; the partial output is not a baseline)
         if (!turnFailed) useStore.getState().commitBaseFor(taskId);
       } catch (err) {
         if ((err as Error)?.name === "AbortError") {
@@ -176,9 +176,9 @@ export function useConvert() {
 }
 
 /**
- * #41 zcode gate: does this SSE event mark the turn FAILED? An `error` event
- * (refused binding / spawn failure / stream error) or a non-zero exit, GATED
- * ON ZCODE ONLY — other agents keep the historical behavior (their CLIs may
+ * zcode gate: does this SSE event mark the turn failed? An `error` event
+ * (refused binding / spawn failure / stream error) or a non-zero exit, gated
+ * on zcode only. Other agents keep the historical behavior (their CLIs may
  * exit non-zero after usable output; the app does not re-interpret them
  * here). Exported for unit tests.
  */
@@ -239,9 +239,9 @@ function handleEvent(
       break;
     }
     case "html": {
-      // Agent decided to write the HTML to a file via the Write tool instead
-      // of streaming it. The parser rescued the file's content from the
-      // tool_use input — REPLACE the accumulated text (preamble + "已输出至 …"
+      // Agent decided to write the HTML to a file via the Write tool rather
+      // than streaming it. The parser rescued the file's content from the
+      // tool_use input; REPLACE the accumulated text (preamble + "已输出至 …"
       // confirmation) so the preview shows the real document.
       if (typeof d.text === "string") {
         store.setHtmlFor(taskId, d.text);
