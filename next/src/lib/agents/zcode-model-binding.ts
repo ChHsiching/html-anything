@@ -1191,3 +1191,27 @@ export function zcodeBindingEnv(
     [ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]: result.builtinCatalogPath,
   };
 }
+
+/** Variable names the ZCode desktop host exports into every terminal it
+ * spawns. A dev server started from one of those terminals inherits them,
+ * and the invoke layer then passes the host's provider config through
+ * instead of binding itself, masking real first-run behaviour. */
+const ZCODE_HOST_INJECTED_PROVIDER_ENV_VARS: readonly string[] = [
+  ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV,
+  ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV,
+];
+
+/** Remove the host-injected provider-config vars from `env` (mutating) and
+ * return the names that were actually present. Dev-server startup calls
+ * this once so the server behaves as if launched from a clean terminal;
+ * when neither var is set it is a no-op. */
+export function stripZcodeHostProviderEnv(env: NodeJS.ProcessEnv): string[] {
+  const removed: string[] = [];
+  for (const name of ZCODE_HOST_INJECTED_PROVIDER_ENV_VARS) {
+    if (env[name] !== undefined) {
+      delete env[name];
+      removed.push(name);
+    }
+  }
+  return removed;
+}

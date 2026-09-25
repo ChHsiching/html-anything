@@ -211,7 +211,8 @@ pnpm -F @html-anything/e2e test
 
 ### ZCode 相关说明
 
-- **模型选择镜像 ZCode 自身的 provider 注册表** —— 选择器列出 ZCode 里所有能用的服务（Coding Plan 加上每个配好密钥的个人 provider，如 DeepSeek、本机网关），顺序照你在 ZCode 里排的；选 `Default` 即跟随 ZCode 自身的默认模型。模型绑定失效时生成会直接报错，不会悄悄换一家。
+- **模型选择镜像 ZCode 自身的 provider 注册表** —— 选择器列出 ZCode 里所有能用的服务（Coding Plan 加上每个配好密钥的个人 provider，如 DeepSeek、本机网关），顺序照你在 ZCode 里排的；每个选项都带服务名，同名模型也分得清。选 `Default` 即跟随 ZCode 自身的默认模型；模型绑定失效时生成会直接报错，html-anything 不会替你换一家。
+- **Team / Start / Off-peak 计划不支持 headless 运行** —— ZCode 的 headless CLI 只展开 individual Coding Plan，这几类计划不会出现在选择器里；要生成请先在 ZCode 里切到 individual Coding Plan。
 - **附件尺寸上限** —— 完整 prompt 以 `.md` 附件发送；ZCode 只读取 **256 KB / 2000 行** 以内的附件，超出即截断。
 - **每轮成本受插件配置影响** —— ZCode 每轮加载你的插件；重度配置实测每轮多花约 10 万 input token、慢约 18 秒，插件产物还可能出现在输出旁边。嫌慢就在 ZCode 侧精简插件；html-anything 只往 ZCode 写一样东西：凭据库里的一个登录身份键。
 - **生成会话保留在 ZCode 里** —— 每次生成的会话仍在 ZCode GUI 里；打开生成目录对应的工作区就能继续。

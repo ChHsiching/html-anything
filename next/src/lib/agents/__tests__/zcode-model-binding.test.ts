@@ -38,6 +38,7 @@ import {
   zcodeBundledCatalogPathForCjs,
   zcodeCachePlatform,
   zcodeProviderEnvPairSet,
+  stripZcodeHostProviderEnv,
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV,
   ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV,
 } from "../zcode-model-binding";
@@ -1134,5 +1135,38 @@ describe("zcodeProviderEnvPairSet", () => {
       } as unknown as NodeJS.ProcessEnv),
     ).toBe(false);
     expect(zcodeProviderEnvPairSet({} as NodeJS.ProcessEnv)).toBe(false);
+  });
+});
+
+describe("stripZcodeHostProviderEnv", () => {
+  it("removes both host-injected vars and reports what was present", () => {
+    const env = {
+      [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: "/host/personal.json",
+      [ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]: "/host/builtin.json",
+      PATH: "/usr/bin",
+    } as unknown as NodeJS.ProcessEnv;
+    const removed = stripZcodeHostProviderEnv(env);
+    expect(removed).toEqual([
+      ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV,
+      ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV,
+    ]);
+    expect(env[ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]).toBeUndefined();
+    expect(env[ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]).toBeUndefined();
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("leaves a clean environment untouched (empty removal list)", () => {
+    const env = { PATH: "/usr/bin" } as unknown as NodeJS.ProcessEnv;
+    expect(stripZcodeHostProviderEnv(env)).toEqual([]);
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("drops only the present half of the pair", () => {
+    const env = {
+      [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: "/host/personal.json",
+    } as unknown as NodeJS.ProcessEnv;
+    const removed = stripZcodeHostProviderEnv(env);
+    expect(removed).toEqual([ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]);
+    expect(env[ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]).toBeUndefined();
   });
 });
