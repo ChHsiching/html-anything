@@ -405,11 +405,7 @@ function AgentCard({
         </div>
         {notReady && agent.notReadyReason && (
           <div className="text-[11px] leading-snug text-[var(--amber)] mt-1.5">
-            {t(
-              agent.notReadyReason === "gui-not-initialized"
-                ? "agent.notReady.guiNotInitialized"
-                : "agent.notReady.notLoggedIn",
-            )}
+            {t("agent.notReady.noUsableProvider")}
           </div>
         )}
         {agent.path && (

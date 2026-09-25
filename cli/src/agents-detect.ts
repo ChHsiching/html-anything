@@ -2,9 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { delimiter, join, posix, win32 } from "node:path";
 import {
-  readZcodePlanDefaultChoice,
-  readZcodePlanModelOptions,
-  readZcodeReadyState,
+  readZcodePickerState,
   type ZcodeNotReadyReason,
 } from "./zcode-model-binding.js";
 
@@ -30,12 +28,12 @@ export type AgentProtocol = "stdin" | "argv" | "argv-message" | "argv-attach" | 
 
 /**
  * A model picker entry. `id`/`label` are the two fields every agent's
- * picker reads. `providerId` is optional and ZCode-only: ZCode's plan
- * chips belong to the GUI-selected plan's catalog provider, and the per-turn
- * binding writes that `{ providerId, modelId, reasoningLevel }` into the
- * provider-config clone the spawn hands the CLI. Absent for every other agent
- * (their picker ids map to a single provider implicitly, or go to
- * `--model <id>`).
+ * picker reads. `providerId` is optional and ZCode-only: ZCode's chips are
+ * namespaced per registry provider (`<providerId>/<modelId>[/<level>]`),
+ * and the per-turn binding writes that
+ * `{ providerId, modelId, reasoningLevel }` into the provider-config clone
+ * the spawn hands the CLI. Absent for every other agent (their picker ids
+ * map to a single provider implicitly, or go to `--model <id>`).
  */
 export type ModelOption = { id: string; label: string; providerId?: string };
 
@@ -44,10 +42,10 @@ export const DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (CLI 
 /**
  * ZCode's static picker floor. Distinct from {@link DEFAULT_MODEL}: ZCode
  * has no `--model` flag and no "CLI config picks" semantics. Default always
- * means "whatever the GUI plan's current default resolves to", so even the
+ * means "whatever ZCode's own default model resolves to", so even the
  * floor label must not imply a CLI-side default.
  */
-const ZCODE_DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (ZCode GUI plan)" };
+const ZCODE_DEFAULT_MODEL: ModelOption = { id: "default", label: "Default (ZCode default)" };
 
 /**
  * Sentinel placed in ZCode's `AgentDef.binArgs` where the resolved path to
@@ -715,10 +713,11 @@ export type DetectedAgent = {
   models: ModelOption[];
   unsupported?: boolean;
   /**
-   * ZCode-only: installed is not the same as ready. True when the GUI plan
-   * resolves and its family is logged in; false with `notReadyReason` when
-   * the user still needs to open/log into the GUI. Absent for every other
-   * agent.
+   * ZCode-only: installed is not the same as ready. True when the registry
+   * mirror holds at least one usable provider (a paired Coding Plan or a
+   * keyed personal provider); false with `notReadyReason` when the user
+   * still needs to log in or add a provider in ZCode. Absent for every
+   * other agent.
    */
   ready?: boolean;
   notReadyReason?: ZcodeNotReadyReason;
@@ -750,45 +749,47 @@ export function detectAgents(): DetectedAgent[] {
     // terminal and present whenever detect passed (zcode.cjs found ⟺ ZCode
     // installed ⟺ exe exists), so there is no null to coalesce here.
     //
-    // The picker lists the GUI-selected plan's models and reasoning
-    // levels, read from setting.json + the install-bundled catalog (the same
-    // sources the invoke layer binds against; see zcode-model-binding.ts).
-    // Chips carry ids of the form "<modelId>/<level>" plus the plan
-    // providerId; the "default" entry binds the plan's own default at invoke
-    // time. The Default chip label names what Default currently resolves to
-    // (the same precedence the invoke layer applies), so the chip never
-    // promises something stale. Reads are gated on availability: an
-    // unavailable install keeps the static floor (ZCODE_DEFAULT_MODEL), and a
-    // not-ready install (GUI never opened / not logged in) reports ready:false
-    // + notReadyReason while keeping whatever plan chips resolved.
+    // The picker mirrors ZCode's headless provider registry (the install-
+    // bundled catalog + the personal provider config + credential key
+    // names — the same sources the invoke layer binds against; see
+    // zcode-model-binding.ts). Chips carry provider-namespaced ids
+    // "<providerId>/<modelId>[/<level>]" with the service name in the label;
+    // the "default" entry binds the registry default at invoke time. The
+    // Default chip label names what Default currently resolves to (the same
+    // chain the invoke layer applies), so the chip never promises something
+    // stale. Reads are gated on availability: an unavailable install keeps
+    // the static floor (ZCODE_DEFAULT_MODEL), and a not-ready install (no
+    // usable keyed provider) reports ready:false + notReadyReason while
+    // keeping the static floor.
     if (protocol === "argv-attach") {
       const cjs = resolveZcodeBin();
       if (cjs) {
-        const readyState = readZcodeReadyState();
-        const planModels = readyState.plan
-          ? readZcodePlanModelOptions({ cjsPath: cjs, plan: readyState.plan })
-          : [];
-        const planDefault = readyState.plan && planModels.length
-          ? readZcodePlanDefaultChoice({ cjsPath: cjs, plan: readyState.plan })
-          : null;
+        const picker = readZcodePickerState({ cjsPath: cjs });
         return {
           ...base,
           available: true,
           path: cjs,
           resolvedBin: resolveZcodeNodeBin(),
-          ready: readyState.ready,
-          notReadyReason: readyState.reason ?? undefined,
-          // Plan chips when they resolved (Default chip first, labelled with
-          // the resolved default model and level); otherwise the static floor.
-          models: planModels.length
+          ready: picker.ready,
+          notReadyReason: picker.reason ?? undefined,
+          // Registry chips when they resolved (Default chip first, labelled
+          // with the resolved default service, model, and level); otherwise
+          // the static floor.
+          models: picker.options.length
             ? [
                 {
                   id: "default",
-                  label: planDefault
-                    ? `Default (${planDefault.modelId}, ${planDefault.reasoningLevel})`
+                  label: picker.defaultChoice
+                    ? `Default (${picker.defaultChoice.providerName} ${
+                      picker.defaultChoice.modelId
+                    }${
+                      picker.defaultChoice.reasoningLevel
+                        ? `, ${picker.defaultChoice.reasoningLevel}`
+                        : ""
+                    })`
                     : ZCODE_DEFAULT_MODEL.label,
                 },
-                ...planModels,
+                ...picker.options,
               ]
             : [ZCODE_DEFAULT_MODEL],
         };

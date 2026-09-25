@@ -854,8 +854,8 @@ describe("invokeAgent", () => {
     it("refuses to spawn when the binding resolution fails (error event, no spawn, temp cleaned)", async () => {
       mockPrepareBinding.mockReturnValue({
         ok: false,
-        code: "gui-keys-missing",
-        message: "ZCode: no model plan found in the GUI settings. Open ZCode, log in and select a model (e.g. your Coding Plan), then retry.",
+        code: "no-usable-provider",
+        message: "ZCode: no usable model provider. Open ZCode, log in or add a model provider, then retry.",
       });
 
       const stream = invokeAgent({

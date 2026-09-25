@@ -1,30 +1,42 @@
-// Unit tests for the per-turn model binding: plan
-// selection from the GUI settings (current keys + legacy fallback), catalog
-// resolution (install-bundled first, cache by freshness), the model and level
-// table from modelRules, the six-link refusal chain, the temp-clone write
-// with the zero-write contract on the user's real config, and the
-// verified binding discriminator.
+// Unit tests for the registry-mirror model binding (v3): enumeration of
+// the headless CLI's provider registry (account individual plans paired by
+// credential keys ⊕ keyed personal providers), ordering, the modelRules
+// level table, the enabled overlays, the default chain, the six-link
+// refusal chain, the add-only identity bridge with the zero-write contract
+// on the user's real files, and the verified binding discriminator.
+//
+// Fixture families (scrubbed from two real machines; structure verbatim):
+// - F3 catalog: next to this file, __fixtures__/zcode-builtin.fixture.json —
+//   the install's rule tables (all-vendor modelRules verbatim, the three
+//   templates the personal fixtures instantiate, their templateModelRules,
+//   all account providerRules, builtinProviderModelRules). Keys, account
+//   ids, and gateway hosts in the personal fixtures are placeholders.
+// - F1 dual-form machine: 4 keyed personal providers (two templates with
+//   empty personalModelIds, one custom local gateway, one custom uuid
+//   gateway) + credentials holding the paired individual keys, the GUI's
+//   team shell api-key key, and the oauth keys.
+// - F2 pure API-key machine: a single keyed bigmodel-api template instance
+//   with empty personalModelIds/modelOrder and NO credentials.json — the
+//   shape the v2 "plan parsing" rejected wholesale (regression anchor).
+//
+// No setting.json is ever written in these tests: v3 reads none, and the
+// one explicit test below proves a stale one cannot influence anything.
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  collectZcodeFamilySelections,
   decodeZcodeModelChoice,
   encodeZcodeModelChoice,
+  enumerateZcodeRegistry,
   migrateLegacyZcodeProviderId,
-  parseZcodeCatalogPlan,
-  parseZcodePlanSelection,
   prepareZcodeModelBinding,
-  readZcodeLoggedInFamilies,
-  readZcodePlanDefaultChoice,
-  readZcodePlanModelOptions,
-  readZcodeReadyState,
+  readZcodePickerState,
   resolveZcodeCatalogFile,
+  resolveZcodeDefaultSelection,
   zcodeBundledCatalogPathForCjs,
   zcodeCachePlatform,
-  zcodePlanProviderId,
   zcodeProviderEnvPairSet,
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV,
   ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV,
@@ -32,246 +44,386 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// ─── Shared fixture shapes (mirroring the install's files) ─────────────
+// ─── F3: the install catalog fixture (structure verbatim) ───────────────
 
-/** Captured legacy setting.json shape (ZCode 3.14.3 that
- * migrated in-memory but retained the legacy fields on disk). */
-const LEGACY_SETTING = {
-  modelProviderFamilyModes: { zai: "oauth", bigmodel: "oauth" },
-  modelProviderFamilySelectedKeys: {
-    zai: "coding-plan:builtin:zai-coding-plan",
-    bigmodel: "coding-plan:builtin:bigmodel-coding-plan",
-  },
-};
-
-const MODERN_SETTING = {
-  providerFamilyDomain: "bigmodel",
-  providerFamilyConnectionSelections: {
-    zai: { kind: "individual-coding-plan" },
-    bigmodel: { kind: "individual-coding-plan" },
-  },
-};
-
-/** Minimal catalog with the real rule shapes from the install's
- * zcode-builtin.json: `.*` base rule, a GLM-5.2-specific rule whose values
- * must override the base (array-order overlay), and one disabled model entry. */
 function catalogFixture(): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(join(here, "__fixtures__", "zcode-builtin.fixture.json"), "utf8"),
+  ) as Record<string, unknown>;
+}
+
+/** Deep-clone + mutate helper for the catalog variants below. */
+function catalogVariant(mutate: (catalog: Record<string, unknown>) => void): Record<string, unknown> {
+  const catalog = JSON.parse(JSON.stringify(catalogFixture())) as Record<string, unknown>;
+  mutate(catalog);
+  return catalog;
+}
+
+// ─── F1: the dual-form machine (personal config + credentials) ──────────
+
+const WECHAT_PROVIDER_ID = "00000000-1111-4222-8333-444444444444";
+const ACCOUNT_ID = "10000000000000001";
+const ACCOUNT_PROVIDER_ID = "account:bigmodel-individual-coding-plan";
+
+function dualFormPersonalConfig(extraConfig: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    revision: "test",
     config: {
+      providerOrder: ["deepseek", "bigmodel-standard-api", "new-provider", WECHAT_PROVIDER_ID],
       providerConfigRules: {
         providerRules: [
           {
-            providerId: "account:bigmodel-individual-coding-plan",
-            providerName: "BigModel Individual Coding Plan",
+            providerId: WECHAT_PROVIDER_ID,
+            providerName: "WeChat CodingPlan Token",
             config: {
-              group: "bigmodel-family",
-              builtinModelIds: ["GLM-5.2", "GLM-5.3", "GLM-5.3-Flash"],
-              access: { type: "zhipu-account", mode: "individual-coding-plan", accountType: "bigmodel" },
+              group: "standard-personal",
+              access: { type: "api-key", apiKey: "fixture-wechat-token" },
+              api: { type: "openai-chat-completions", baseUrl: "https://gateway.example.com/openai/v1" },
+              personalModelIds: ["GLM-5.2", "Deepseek-v4-flash"],
+              modelOrder: ["GLM-5.2", "Deepseek-v4-flash"],
+            },
+          },
+          {
+            providerId: "bigmodel-standard-api",
+            templateId: "bigmodel-standard-api",
+            providerName: "BigModel API",
+            config: {
+              group: "standard-personal",
+              access: { type: "api-key", apiKey: "fixture-bigmodel-key" },
+              api: { type: "openai-chat-completions" },
+              personalModelIds: [],
+              modelOrder: [
+                "GLM-5.3", "GLM-5.3-Flash", "GLM-5V-Turbo", "GLM-5.1", "GLM-5.1-Highspeed",
+                "GLM-5", "GLM-5-Turbo", "GLM-4.7", "GLM-4.7-FlashX", "GLM-4.7-Flash",
+                "GLM-4.6", "GLM-4.5-Air", "GLM-4.5", "GLM-4.6V", "GLM-4.6V-Flash",
+                "GLM-4.6V-FlashX", "GLM-4.1V-Thinking-FlashX", "GLM-4.1V-Thinking-Flash",
+                "GLM-4-FlashX-250414", "GLM-4-Flash-250414", "GLM-4V-Flash", "codegeex-4",
+                "charglm-4", "emohaa",
+              ],
+            },
+          },
+          {
+            providerId: "deepseek",
+            templateId: "deepseek",
+            providerName: "DeepSeek",
+            config: {
+              group: "standard-personal",
+              access: { type: "api-key", apiKey: "fixture-deepseek-key" },
+              api: { type: "openai-responses", baseUrl: "https://api.deepseek.com" },
+              personalModelIds: [],
+              modelOrder: ["deepseek-flash", "deepseek-v4-pro"],
+            },
+          },
+          {
+            providerId: "new-provider",
+            providerName: "llama.cpp",
+            config: {
+              group: "standard-personal",
+              access: { type: "api-key", apiKey: "sk-local" },
+              api: { type: "openai-chat-completions", baseUrl: "http://127.0.0.1:8027/v1" },
+              personalModelIds: ["Qwen3.6-35B-A3B", "Qwen3.8-27B"],
+              modelOrder: ["Qwen3.6-35B-A3B", "Qwen3.8-27B"],
             },
           },
         ],
       },
       modelConfigRules: {
-        modelRules: [
+        providerModelRules: [
           {
-            modelMatch: ".*",
-            config: { optionSpecs: { reasoningLevel: { values: ["disabled", "enabled"] } } },
+            modelId: "GLM-5.2",
+            config: { properties: { contextWindow: 200000 } },
+            providerId: WECHAT_PROVIDER_ID,
           },
           {
-            modelMatch: ".*GLM-5\\.2(?:[.\\-:/\\[].*)?",
-            config: { optionSpecs: { reasoningLevel: { values: ["disabled", "high", "max"] } } },
+            modelId: "Deepseek-v4-flash",
+            config: { properties: { contextWindow: 1000000 } },
+            providerId: WECHAT_PROVIDER_ID,
           },
           {
-            modelMatch: ".*GLM-5\\.3-Flash.*",
-            config: { optionSpecs: { reasoningLevel: { values: ["low", "medium"] } } },
+            modelId: "Qwen3.6-35B-A3B",
+            config: {
+              enabled: true,
+              properties: { contextWindow: 262144, inputFormat: { supportsImage: true } },
+              supportsJsonSchemaOutput: true,
+              supportsMidConversationSystem: true,
+            },
+            optionSpecs: { maxOutputTokens: { max: 16384 } },
+            providerId: "new-provider",
+          },
+          {
+            modelId: "Qwen3.8-27B",
+            config: {
+              enabled: false,
+              properties: { contextWindow: 16384, inputFormat: { supportsImage: true } },
+              supportsJsonSchemaOutput: true,
+              supportsMidConversationSystem: true,
+            },
+            optionSpecs: { maxOutputTokens: { max: 8192 } },
+            providerId: "new-provider",
           },
         ],
-        builtinProviderModelRules: [
-          { providerId: "account:bigmodel-individual-coding-plan", modelId: "GLM-5.2", config: { enabled: true } },
-          { providerId: "account:bigmodel-individual-coding-plan", modelId: "GLM-5.3", config: { enabled: true } },
-          { providerId: "account:bigmodel-individual-coding-plan", modelId: "GLM-5.3-Flash", config: { enabled: false } },
-        ],
+        manualProviderModelRules: [],
       },
-    },
-  };
-}
-
-function personalConfigFixture(extraConfig: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    schemaVersion: 1,
-    config: {
-      providerOrder: ["new-provider", "deepseek", "00000000-1111-4222-8333-444444444444"],
-      providerRules: [
-        { providerId: "00000000-1111-4222-8333-444444444444", providerName: "custom gateway", config: { access: { type: "api-key", apiKey: "sk-x" } } },
-      ],
       ...extraConfig,
     },
   };
 }
 
-// ─── Plan selection ─────────────────────────────────────────────────────────
+/** F1 credential key names (values are opaque fakes; only names and the
+ * plaintext identity value matter to the adapter). The team api-key key is
+ * the GUI's auto-laid shell: no identity key exists for it. */
+function dualFormCredentials(): Record<string, string> {
+  return {
+    "oauth:bigmodel:access_token": "enc:v1:fixture",
+    "oauth:bigmodel:user_info": "enc:v1:fixture",
+    zcodejwttoken: "enc:v1:fixture",
+    "oauth:active_provider": "enc:v1:fixture",
+    [`account-provider:coding-plan:${ACCOUNT_PROVIDER_ID}:account:${ACCOUNT_ID}:api-key`]:
+      "enc:v1:fixture",
+    [`account-provider:coding-plan:account:bigmodel-team-coding-plan:account:${ACCOUNT_ID}:api-key`]:
+      "enc:v1:fixture",
+    [`account-provider:${ACCOUNT_PROVIDER_ID}:identity`]: ACCOUNT_ID,
+  };
+}
 
-describe("collectZcodeFamilySelections", () => {
-  it("reads the modern providerFamilyConnectionSelections keys", () => {
-    const selections = collectZcodeFamilySelections(MODERN_SETTING);
-    expect(selections.get("zai")).toBe("individual-coding-plan");
-    expect(selections.get("bigmodel")).toBe("individual-coding-plan");
+// ─── F2: the pure API-key machine ────────────────────────────────────────
+
+function pureApiKeyPersonalConfig(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    config: {
+      providerOrder: ["bigmodel-api"],
+      providerConfigRules: {
+        providerRules: [
+          {
+            providerId: "bigmodel-api",
+            templateId: "bigmodel-api",
+            providerName: "BigModel Coding Plan",
+            config: {
+              group: "standard-personal",
+              access: { type: "zhipu-coding-plan-api-key", apiKey: "fixture-coding-plan-key" },
+              personalModelIds: [],
+              modelOrder: [],
+            },
+          },
+        ],
+      },
+      modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+    },
+  };
+}
+
+// ─── Fixture tree (install + personal + credentials on temp disk) ────────
+
+interface FixtureTree {
+  cjs: string;
+  catalogPath: string;
+  personalPath: string;
+  credentialsPath: string;
+  attachDir: string;
+  dir: string;
+}
+
+function writeFixtureTree(
+  dir: string,
+  opts: {
+    catalog?: unknown;
+    personal?: Record<string, unknown>;
+    credentials?: Record<string, string> | null;
+  } = {},
+): FixtureTree {
+  const catalog = opts.catalog ?? catalogFixture();
+  const install = join(dir, "install");
+  mkdirSync(join(install, "resources", "glm"), { recursive: true });
+  mkdirSync(join(install, "resources", "config", "provider"), { recursive: true });
+  const cjs = join(install, "resources", "glm", "zcode.cjs");
+  writeFileSync(cjs, "");
+  const catalogPath = join(install, "resources", "config", "provider", "zcode-builtin.json");
+  writeFileSync(catalogPath, JSON.stringify(catalog));
+  const personalPath = join(dir, "provider_config.json");
+  writeFileSync(personalPath, JSON.stringify(opts.personal ?? dualFormPersonalConfig()));
+  const credentialsPath = join(dir, "credentials.json");
+  const credentials = opts.credentials === undefined ? dualFormCredentials() : opts.credentials;
+  if (credentials !== null) writeFileSync(credentialsPath, JSON.stringify(credentials, null, 2));
+  const attachDir = join(dir, "attach");
+  mkdirSync(attachDir, { recursive: true });
+  return { cjs, catalogPath, personalPath, credentialsPath, attachDir, dir };
+}
+
+// ─── Registry enumeration ─────────────────────────────────────────────────
+
+describe("enumerateZcodeRegistry (the registry mirror)", () => {
+  it("F1 dual-form: account individual first (catalog order), then personal by providerOrder; team shell keys produce no entry", () => {
+    const providers = enumerateZcodeRegistry(
+      catalogFixture(),
+      dualFormPersonalConfig(),
+      dualFormCredentials(),
+    );
+    expect(providers.map((p) => [p.providerId, p.providerName, p.kind])).toEqual([
+      [ACCOUNT_PROVIDER_ID, "BigModel Individual Coding Plan", "account"],
+      ["deepseek", "DeepSeek", "personal"],
+      ["bigmodel-standard-api", "BigModel API", "personal"],
+      ["new-provider", "llama.cpp", "personal"],
+      [WECHAT_PROVIDER_ID, "WeChat CodingPlan Token", "personal"],
+    ]);
+    // The GUI's team shell api-key key names a team provider (no identity
+    // key, and team mode is never expanded): no team entry anywhere.
+    expect(providers.some((p) => p.providerId.includes("team"))).toBe(false);
+    expect(providers.some((p) => p.providerId.includes("start"))).toBe(false);
+    expect(providers.some((p) => p.providerId.includes("offpeak"))).toBe(false);
+    // The paired identity rides along for the account entry.
+    expect(providers[0]!.accountIdentity).toBe(ACCOUNT_ID);
+    expect(providers.slice(1).every((p) => p.accountIdentity === undefined)).toBe(true);
   });
 
-  it("modern keys win wholesale; legacy fields are ignored when present", () => {
-    const setting = {
-      ...LEGACY_SETTING,
-      providerFamilyConnectionSelections: { bigmodel: { kind: "team-coding-plan", productId: "p", organizationId: "o", projectId: "j" } },
+  it("F1 model tables: template builtin lists ∪ personalModelIds under the enabled overlays, with modelRules levels", () => {
+    const providers = enumerateZcodeRegistry(
+      catalogFixture(),
+      dualFormPersonalConfig(),
+      dualFormCredentials(),
+    );
+    const modelsOf = (p: (typeof providers)[number]) => p.models.map((m) => [m.modelId, m.levels]);
+    // Account plan: catalog builtinModelIds, levels from the glm-5.3 rule.
+    expect(modelsOf(providers[0]!)).toEqual([
+      ["GLM-5.3", ["low", "high", "max"]],
+      ["GLM-5.3-Flash", ["low", "high", "max"]],
+    ]);
+    // deepseek template: personalModelIds empty → template builtinModelIds
+    // in modelOrder, templateModelRules entries enabled.
+    expect(modelsOf(providers[1]!)).toEqual([
+      ["deepseek-flash", ["disabled", "low", "high", "max"]],
+      ["deepseek-v4-pro", ["disabled", "low", "high", "max"]],
+    ]);
+    // bigmodel-standard-api: 24 template ids, but templateModelRules
+    // disables all but GLM-5.3 / GLM-5.3-Flash.
+    expect(modelsOf(providers[2]!)).toEqual([
+      ["GLM-5.3", ["low", "high", "max"]],
+      ["GLM-5.3-Flash", ["low", "high", "max"]],
+    ]);
+    // llama.cpp custom provider: Qwen3.8-27B dropped by the personal
+    // providerModelRules enabled:false entry; Qwen3.6-35B-A3B hits no
+    // specific rule → the base .* table only.
+    expect(modelsOf(providers[3]!)).toEqual([["Qwen3.6-35B-A3B", ["disabled", "enabled"]]]);
+    // WeChat custom gateway: personalModelIds as-is.
+    expect(modelsOf(providers[4]!)).toEqual([
+      ["GLM-5.2", ["disabled", "high", "max"]],
+      ["Deepseek-v4-flash", ["disabled", "low", "high", "max"]],
+    ]);
+  });
+
+  it("F1 without the credential pair: account drops out, personal providers remain", () => {
+    const providers = enumerateZcodeRegistry(
+      catalogFixture(),
+      dualFormPersonalConfig(),
+      // identity key present but naming a DIFFERENT account: the CLI's own
+      // entitlement check pairs identity value → api-key key name, so this
+      // does not materialize either.
+      {
+        ...dualFormCredentials(),
+        [`account-provider:${ACCOUNT_PROVIDER_ID}:identity`]: "10000000000000002",
+      },
+    );
+    expect(providers.map((p) => p.providerId)).toEqual([
+      "deepseek",
+      "bigmodel-standard-api",
+      "new-provider",
+      WECHAT_PROVIDER_ID,
+    ]);
+  });
+
+  it("F2 pure API-key machine: single template instance enumerates the template builtinModelIds with levels; no credentials.json at all", () => {
+    // Regression anchor: the v2 plan-parsing rejected this shape wholesale
+    // ("not logged in"); the registry mirror enumerates it.
+    const providers = enumerateZcodeRegistry(catalogFixture(), pureApiKeyPersonalConfig(), null);
+    expect(providers.map((p) => [p.providerId, p.kind])).toEqual([["bigmodel-api", "personal"]]);
+    expect(providers[0]!.models).toEqual([
+      { modelId: "GLM-5.3", levels: ["low", "high", "max"] },
+      { modelId: "GLM-5.3-Flash", levels: ["low", "high", "max"] },
+    ]);
+  });
+
+  it("a keyed provider missing from providerOrder follows after the ordered ones (declaration order)", () => {
+    const personal = dualFormPersonalConfig();
+    const config = personal.config as { providerOrder: string[] };
+    config.providerOrder = ["bigmodel-standard-api", "new-provider", WECHAT_PROVIDER_ID];
+    const providers = enumerateZcodeRegistry(catalogFixture(), personal, dualFormCredentials());
+    expect(providers.map((p) => p.providerId)).toEqual([
+      ACCOUNT_PROVIDER_ID,
+      "bigmodel-standard-api",
+      "new-provider",
+      WECHAT_PROVIDER_ID,
+      "deepseek",
+    ]);
+  });
+
+  it("keyless / hidden / disabled personal entries are not enumerated (an explicit pick of them refuses later)", () => {
+    const personal = dualFormPersonalConfig();
+    const rules = (personal.config as {
+      providerConfigRules: { providerRules: Array<Record<string, unknown>> };
+    }).providerConfigRules.providerRules;
+    // Strip deepseek's key, hide llama.cpp, disable the WeChat entry.
+    const deepseek = rules.find((r) => r.providerId === "deepseek") as {
+      config: { access: { apiKey?: string } };
     };
-    const selections = collectZcodeFamilySelections(setting);
-    expect(selections.size).toBe(1);
-    expect(selections.get("bigmodel")).toBe("team-coding-plan");
+    delete deepseek.config.access.apiKey;
+    const llama = rules.find((r) => r.providerId === "new-provider") as {
+      config: Record<string, unknown>;
+    };
+    llama.config.visibility = "hidden";
+    const wechat = rules.find((r) => r.providerId === WECHAT_PROVIDER_ID) as {
+      config: Record<string, unknown>;
+    };
+    wechat.config.enabled = false;
+    const providers = enumerateZcodeRegistry(catalogFixture(), personal, dualFormCredentials());
+    expect(providers.map((p) => p.providerId)).toEqual([
+      ACCOUNT_PROVIDER_ID,
+      "bigmodel-standard-api",
+    ]);
   });
 
-  it("team selection requires the three identity ids", () => {
-    const selections = collectZcodeFamilySelections({
-      providerFamilyConnectionSelections: {
-        bigmodel: { kind: "team-coding-plan", productId: "", organizationId: "o", projectId: "j" },
-        zai: { kind: "start-plan" },
-      },
+  it("a catalog whose modelRules match nothing leaves models level-less (still enumerable)", () => {
+    const catalog = catalogVariant((c) => {
+      (c.config as { modelConfigRules: { modelRules: unknown[] } }).modelConfigRules.modelRules = [];
     });
-    expect(selections.has("bigmodel")).toBe(false);
-    expect(selections.get("zai")).toBe("start-plan");
+    const providers = enumerateZcodeRegistry(catalog, dualFormPersonalConfig(), dualFormCredentials());
+    expect(providers[0]!.models).toEqual([
+      { modelId: "GLM-5.3", levels: [] },
+      { modelId: "GLM-5.3-Flash", levels: [] },
+    ]);
   });
 
-  it("migrates the legacy keys (coding-plan + start-plan + team shapes)", () => {
-    const selections = collectZcodeFamilySelections({
-      modelProviderFamilySelectedKeys: {
-        zai: "coding-plan:builtin:zai-start-plan",
-        bigmodel: "team-plan:builtin:bigmodel-coding-plan:p%201:o:j",
-      },
-    });
-    expect(selections.get("zai")).toBe("start-plan");
-    expect(selections.get("bigmodel")).toBe("team-coding-plan");
+  it("a personal enabled:true re-enables a template-disabled model (last-write-wins overlay)", () => {
+    // The catalog's templateModelRules disables GLM-5V-Turbo on
+    // bigmodel-standard-api; a personal providerModelRules entry with
+    // enabled:true re-enables it, mirroring composeEffective's
+    // [...builtin, ...personal] overlay order.
+    const personal = dualFormPersonalConfig();
+    (personal.config as { modelConfigRules: { providerModelRules: unknown[] } }).modelConfigRules
+      .providerModelRules.push({
+        modelId: "GLM-5V-Turbo",
+        config: { enabled: true },
+        providerId: "bigmodel-standard-api",
+      });
+    const providers = enumerateZcodeRegistry(catalogFixture(), personal, dualFormCredentials());
+    const standard = providers.find((p) => p.providerId === "bigmodel-standard-api")!;
+    expect(standard.models.map((m) => m.modelId)).toEqual([
+      "GLM-5.3",
+      "GLM-5.3-Flash",
+      "GLM-5V-Turbo",
+    ]);
+    expect(standard.models[2]!.levels).toEqual(["disabled", "enabled"]);
   });
 
-  it("skips a legacy team key without three non-empty parts, and apiKey-mode families", () => {
-    const selections = collectZcodeFamilySelections({
-      modelProviderFamilyModes: { zai: "apiKey", bigmodel: "oauth" },
-      modelProviderFamilySelectedKeys: {
-        zai: "coding-plan:builtin:zai-coding-plan",
-        bigmodel: "team-plan:builtin:bigmodel-coding-plan:only-two",
-      },
-    });
-    expect(selections.size).toBe(0);
-  });
-
-  it("returns an empty map for settings without any selection keys", () => {
-    expect(collectZcodeFamilySelections({ locale: "zh-CN" }).size).toBe(0);
-    expect(collectZcodeFamilySelections(null).size).toBe(0);
-  });
-});
-
-describe("parseZcodePlanSelection", () => {
-  it("providerFamilyDomain picks the family; providerId maps kind → account id", () => {
-    const plan = parseZcodePlanSelection(MODERN_SETTING);
-    expect(plan).toEqual({
-      family: "bigmodel",
-      kind: "individual-coding-plan",
-      providerId: "account:bigmodel-individual-coding-plan",
-    });
-  });
-
-  it("domain set but that family has no selection → null (refuse, never guess)", () => {
+  it("malformed inputs degrade to an empty registry (never throws)", () => {
+    expect(enumerateZcodeRegistry(null, null, null)).toEqual([]);
+    expect(enumerateZcodeRegistry({}, {}, {})).toEqual([]);
     expect(
-      parseZcodePlanSelection({
-        providerFamilyDomain: "zai",
-        providerFamilyConnectionSelections: { bigmodel: { kind: "individual-coding-plan" } },
-      }),
-    ).toBeNull();
-  });
-
-  it("domain absent + single selected family → that family (even logged out)", () => {
-    const plan = parseZcodePlanSelection(LEGACY_SETTING, new Set());
-    // zai AND bigmodel are both selected here; with no login signal the GUI's
-    // family order decides, and with exactly one login it wins instead.
-    expect(plan!.family).toBe("zai");
-    const loggedIn = parseZcodePlanSelection(LEGACY_SETTING, new Set(["bigmodel" as const]));
-    expect(loggedIn!.family).toBe("bigmodel");
-  });
-
-  it("a single selected family resolves without login signal", () => {
-    const plan = parseZcodePlanSelection({
-      modelProviderFamilySelectedKeys: { bigmodel: "coding-plan:builtin:bigmodel-coding-plan" },
-    });
-    expect(plan!.providerId).toBe("account:bigmodel-individual-coding-plan");
-  });
-
-  it("no selections at all → null", () => {
-    expect(parseZcodePlanSelection({})).toBeNull();
-  });
-
-  it("zcodePlanProviderId covers every kind", () => {
-    expect(zcodePlanProviderId("zai", "start-plan")).toBe("account:zai-start-plan");
-    expect(zcodePlanProviderId("bigmodel", "team-coding-plan")).toBe("account:bigmodel-team-coding-plan");
+      enumerateZcodeRegistry({ schemaVersion: 1, config: {} }, { config: {} }, {}),
+    ).toEqual([]);
   });
 });
 
-describe("readZcodeLoggedInFamilies / readZcodeReadyState", () => {
-  it("only oauth:<family>:access_token key names count as the login signal", () => {
-    const families = readZcodeLoggedInFamilies({
-      "oauth:bigmodel:access_token": "enc:xxx",
-      "oauth:bigmodel:user_info": "enc:xxx",
-      "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:1:api-key": "enc:xxx",
-      zcodejwttoken: "enc:xxx",
-    });
-    expect([...families]).toEqual(["bigmodel"]);
-  });
-
-  describe("with real temp files", () => {
-    let dir: string;
-    beforeEach(() => {
-      dir = mkdtempSync(join(tmpdir(), "zcode-binding-test-"));
-    });
-    afterEach(() => {
-      rmSync(dir, { recursive: true, force: true });
-    });
-
-    it("missing setting.json → gui-not-initialized (未开过 GUI)", () => {
-      const state = readZcodeReadyState({ settingPath: join(dir, "nope-setting.json") });
-      expect(state).toEqual({ ready: false, reason: "gui-not-initialized", plan: null });
-    });
-
-    it("setting without selection keys → not-logged-in", () => {
-      const settingPath = join(dir, "setting.json");
-      writeFileSync(settingPath, JSON.stringify({ locale: "zh-CN" }));
-      const state = readZcodeReadyState({ settingPath });
-      expect(state.ready).toBe(false);
-      expect(state.reason).toBe("not-logged-in");
-    });
-
-    it("plan resolved but family has no oauth token → not-logged-in (plan still named)", () => {
-      const settingPath = join(dir, "setting.json");
-      writeFileSync(settingPath, JSON.stringify(MODERN_SETTING));
-      const credentialsPath = join(dir, "credentials.json");
-      writeFileSync(credentialsPath, JSON.stringify({ "oauth:zai:access_token": "enc:x" }));
-      const state = readZcodeReadyState({ settingPath, credentialsPath });
-      expect(state.ready).toBe(false);
-      expect(state.reason).toBe("not-logged-in");
-      expect(state.plan!.providerId).toBe("account:bigmodel-individual-coding-plan");
-    });
-
-    it("plan + oauth token → ready", () => {
-      const settingPath = join(dir, "setting.json");
-      writeFileSync(settingPath, JSON.stringify(LEGACY_SETTING));
-      const credentialsPath = join(dir, "credentials.json");
-      writeFileSync(credentialsPath, JSON.stringify({ "oauth:bigmodel:access_token": "enc:x" }));
-      const state = readZcodeReadyState({ settingPath, credentialsPath });
-      expect(state.ready).toBe(true);
-      expect(state.reason).toBeNull();
-      expect(state.plan!.family).toBe("bigmodel");
-    });
-  });
-});
-
-// ─── Catalog resolution ─────────────────────────────────────────────────────
+// ─── Catalog resolution (unchanged mechanics) ─────────────────────────────
 
 describe("zcodeBundledCatalogPathForCjs", () => {
   it("derives <install>/resources/config/provider/zcode-builtin.json from the cjs", () => {
@@ -294,6 +446,9 @@ describe("resolveZcodeCatalogFile", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  /** Minimal schema-valid body (the shape gate only needs schemaVersion+config). */
+  const minimalCatalog = { schemaVersion: 1, config: {} };
+
   function writeInstall(dirName: string, body: unknown): { cjs: string } {
     const install = join(dir, dirName);
     mkdirSync(join(install, "resources", "glm"), { recursive: true });
@@ -311,8 +466,8 @@ describe("resolveZcodeCatalogFile", () => {
   }
 
   it("prefers the install-bundled file (version-consistent with the cjs)", () => {
-    writeCache("3.14.3", "endpoint-a", catalogFixture());
-    const { cjs } = writeInstall("install", catalogFixture());
+    writeCache("3.14.3", "endpoint-a", minimalCatalog);
+    const { cjs } = writeInstall("install", minimalCatalog);
     const catalog = resolveZcodeCatalogFile({ cjsPath: cjs, cacheRoot: join(dir, "cache") });
     expect(catalog!.source).toBe("install");
     expect(catalog!.path).toBe(join(dirname(dirname(cjs)), "config", "provider", "zcode-builtin.json"));
@@ -320,17 +475,16 @@ describe("resolveZcodeCatalogFile", () => {
 
   it("falls back to the NEWEST cache version by freshness (3.14.10 > 3.14.9 > 3.9.2)", () => {
     const { cjs } = writeInstall("install-empty", {});
-    writeCache("3.9.2", "endpoint-a", catalogFixture());
-    writeCache("3.14.9", "endpoint-a", catalogFixture());
-    writeCache("3.14.10", "endpoint-b", catalogFixture());
+    writeCache("3.9.2", "endpoint-a", minimalCatalog);
+    writeCache("3.14.9", "endpoint-a", minimalCatalog);
+    writeCache("3.14.10", "endpoint-b", minimalCatalog);
     const catalog = resolveZcodeCatalogFile({ cjsPath: cjs, cacheRoot: join(dir, "cache") });
     expect(catalog!.source).toBe("cache");
     expect(catalog!.path).toContain("3.14.10");
   });
 
   it("a schemaVersion other than 1 is rejected (schema gate)", () => {
-    const bad = { ...catalogFixture(), schemaVersion: 2 };
-    const { cjs } = writeInstall("install", bad);
+    const { cjs } = writeInstall("install", { ...minimalCatalog, schemaVersion: 2 });
     expect(resolveZcodeCatalogFile({ cjsPath: cjs, cacheRoot: join(dir, "cache") })).toBeNull();
   });
 
@@ -341,199 +495,241 @@ describe("resolveZcodeCatalogFile", () => {
   });
 });
 
-// ─── Model and level table ──────────────────────────────────────────────────
-
-describe("parseZcodeCatalogPlan", () => {
-  it("last matching modelRules rule wins (array-order overlay, case-insensitive full match)", () => {
-    const plan = parseZcodeCatalogPlan(catalogFixture(), "account:bigmodel-individual-coding-plan");
-    expect(plan.models).toEqual([
-      { modelId: "GLM-5.2", levels: ["disabled", "high", "max"] },
-      { modelId: "GLM-5.3", levels: ["disabled", "enabled"] },
-    ]);
-  });
-
-  it("an explicit enabled:false drops the model; a missing entry keeps it on", () => {
-    const catalog = catalogFixture() as {
-      config: { modelConfigRules: { builtinProviderModelRules: Array<Record<string, unknown>> } };
-    };
-    // GLM-5.3 has an explicit enabled:true entry; drop it entirely; the model
-    // must stay listed (rules are an override table).
-    catalog.config.modelConfigRules.builtinProviderModelRules =
-      catalog.config.modelConfigRules.builtinProviderModelRules.filter(
-        (r) => !(r.modelId === "GLM-5.3"),
-      );
-    const plan = parseZcodeCatalogPlan(catalog, "account:bigmodel-individual-coding-plan");
-    expect(plan.models.map((m) => m.modelId)).toEqual(["GLM-5.2", "GLM-5.3"]);
-  });
-
-  it("unknown provider or malformed catalog → empty models", () => {
-    expect(parseZcodeCatalogPlan(catalogFixture(), "account:unknown").models).toEqual([]);
-    expect(parseZcodeCatalogPlan(null, "account:bigmodel-individual-coding-plan").models).toEqual([]);
-  });
-});
-
-// ─── Picker id codec + legacy id migration ──────────────────────────────────
+// ─── Picker id codec ──────────────────────────────────────────────────────
 
 describe("picker id codec", () => {
-  it("round-trips a (modelId, level) pair", () => {
-    const id = encodeZcodeModelChoice("GLM-5.2", "high");
-    expect(id).toBe("GLM-5.2/high");
-    expect(decodeZcodeModelChoice(id)).toEqual({ modelId: "GLM-5.2", reasoningLevel: "high" });
-  });
-
-  it("rejects ids without a level suffix (plain model ids are not valid picks)", () => {
-    expect(decodeZcodeModelChoice("GLM-5.2")).toBeNull();
-    expect(decodeZcodeModelChoice("default")).toBeNull();
-    expect(decodeZcodeModelChoice("/high")).toBeNull();
-    expect(decodeZcodeModelChoice("GLM-5.2/")).toBeNull();
-  });
-});
-
-describe("readZcodePlanModelOptions (detect-surface composition)", () => {
-  it("expands the plan's models into model/level chips with encoded ids", () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-plan-options-"));
-    try {
-      const install = join(dir, "install");
-      mkdirSync(join(install, "resources", "glm"), { recursive: true });
-      mkdirSync(join(install, "resources", "config", "provider"), { recursive: true });
-      const cjs = join(install, "resources", "glm", "zcode.cjs");
-      writeFileSync(cjs, "");
-      writeFileSync(
-        join(install, "resources", "config", "provider", "zcode-builtin.json"),
-        JSON.stringify(catalogFixture()),
-      );
-      const plan = parseZcodePlanSelection(MODERN_SETTING);
-      expect(plan).not.toBeNull();
-      const options = readZcodePlanModelOptions({ cjsPath: cjs, plan: plan! });
-      expect(options).toEqual([
-        { id: "GLM-5.2/disabled", label: "GLM-5.2 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.2/high", label: "GLM-5.2 (high)", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.2/max", label: "GLM-5.2 (max)", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.3/disabled", label: "GLM-5.3 (disabled)", providerId: "account:bigmodel-individual-coding-plan" },
-        { id: "GLM-5.3/enabled", label: "GLM-5.3 (enabled)", providerId: "account:bigmodel-individual-coding-plan" },
-      ]);
-      // Unreadable catalog → empty chips (caller keeps the static floor).
-      rmSync(join(install, "resources", "config", "provider", "zcode-builtin.json"), { force: true });
-      expect(readZcodePlanModelOptions({ cjsPath: cjs, plan: plan!, cacheRoot: join(dir, "no-cache") })).toEqual([]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("readZcodePlanDefaultChoice (Default-chip label source)", () => {
-  function defaultChoiceTree(extraPersonalConfig: Record<string, unknown> = {}): {
-    dir: string;
-    cjs: string;
-    personalPath: string;
-  } {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-plan-default-"));
-    const install = join(dir, "install");
-    mkdirSync(join(install, "resources", "glm"), { recursive: true });
-    mkdirSync(join(install, "resources", "config", "provider"), { recursive: true });
-    const cjs = join(install, "resources", "glm", "zcode.cjs");
-    writeFileSync(cjs, "");
-    writeFileSync(
-      join(install, "resources", "config", "provider", "zcode-builtin.json"),
-      JSON.stringify(catalogFixture()),
+  it("encodes provider-namespaced ids with and without a level", () => {
+    expect(encodeZcodeModelChoice("deepseek", "deepseek-flash", "max")).toBe(
+      "deepseek/deepseek-flash/max",
     );
-    const personalPath = join(dir, "provider_config.json");
-    writeFileSync(personalPath, JSON.stringify(personalConfigFixture(extraPersonalConfig)));
-    return { dir, cjs, personalPath };
-  }
-
-  it("no configured default → plan's first enabled model + last level (same precedence as a default pick)", () => {
-    const f = defaultChoiceTree();
-    try {
-      const plan = parseZcodePlanSelection(MODERN_SETTING);
-      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath }))
-        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "max" });
-    } finally {
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  it("honours the GUI's valid defaultModelSelection (legacy provider id migrated)", () => {
-    const f = defaultChoiceTree({
-      defaultModelSelection: {
-        providerId: "builtin:bigmodel-coding-plan",
-        modelId: "GLM-5.2",
-        options: { reasoningLevel: "high" },
-      },
-    });
-    try {
-      const plan = parseZcodePlanSelection(MODERN_SETTING);
-      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath }))
-        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "high" });
-    } finally {
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  it("a configured default targeting another provider → plan default (label never promises a foreign provider)", () => {
-    const f = defaultChoiceTree({
-      defaultModelSelection: { providerId: "deepseek", modelId: "deepseek-chat", options: { reasoningLevel: "high" } },
-    });
-    try {
-      const plan = parseZcodePlanSelection(MODERN_SETTING);
-      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath }))
-        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "max" });
-    } finally {
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  it("unreadable personal config degrades to the plan default (label-only read; invoke still refuses)", () => {
-    const f = defaultChoiceTree();
-    try {
-      const plan = parseZcodePlanSelection(MODERN_SETTING);
-      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: plan!, personalConfigPath: join(f.dir, "missing.json") }))
-        .toEqual({ modelId: "GLM-5.2", reasoningLevel: "max" });
-    } finally {
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  it("unreadable catalog → null (detect keeps the generic Default label)", () => {
-    const f = defaultChoiceTree();
-    try {
-      rmSync(join(f.dir, "install", "resources", "config", "provider", "zcode-builtin.json"), { force: true });
-      const plan = parseZcodePlanSelection(MODERN_SETTING);
-      expect(readZcodePlanDefaultChoice({
-        cjsPath: f.cjs, plan: plan!, personalConfigPath: f.personalPath, cacheRoot: join(f.dir, "no-cache"),
-      })).toBeNull();
-    } finally {
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  it("a plan with no models in the catalog → null", () => {
-    const f = defaultChoiceTree();
-    try {
-      const zaiPlan = parseZcodePlanSelection({
-        providerFamilyDomain: "zai",
-        providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
-      });
-      expect(zaiPlan).not.toBeNull();
-      expect(readZcodePlanDefaultChoice({ cjsPath: f.cjs, plan: zaiPlan!, personalConfigPath: f.personalPath }))
-        .toBeNull();
-    } finally {
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("migrateLegacyZcodeProviderId", () => {
-  it("maps the legacy coding-plan ids one-way; everything else passes through", () => {
-    expect(migrateLegacyZcodeProviderId("builtin:bigmodel-coding-plan")).toBe(
-      "account:bigmodel-individual-coding-plan",
+    expect(encodeZcodeModelChoice("new-provider", "Qwen3.6-35B-A3B")).toBe(
+      "new-provider/Qwen3.6-35B-A3B",
     );
-    expect(migrateLegacyZcodeProviderId("builtin:zai-coding-plan")).toBe("account:zai-individual-coding-plan");
+    expect(encodeZcodeModelChoice("p", "m", null)).toBe("p/m");
+  });
+
+  it("decode is structural: the first segment is the providerId; empty segments fail", () => {
+    expect(decodeZcodeModelChoice("deepseek/deepseek-flash/max")).toEqual({ providerId: "deepseek" });
+    // Model ids containing "/" (openrouter-style) still decode to the provider.
+    expect(decodeZcodeModelChoice("my-router/anthropic/claude-fable-5.1")).toEqual({
+      providerId: "my-router",
+    });
+    expect(decodeZcodeModelChoice("deepseek")).toBeNull();
+    expect(decodeZcodeModelChoice("deepseek/")).toBeNull();
+    expect(decodeZcodeModelChoice("/deepseek-flash")).toBeNull();
+    expect(decodeZcodeModelChoice("a//b")).toBeNull();
+  });
+
+  it("migrateLegacyZcodeProviderId maps the legacy coding-plan ids one-way", () => {
+    expect(migrateLegacyZcodeProviderId("builtin:bigmodel-coding-plan")).toBe(ACCOUNT_PROVIDER_ID);
+    expect(migrateLegacyZcodeProviderId("builtin:zai-coding-plan")).toBe(
+      "account:zai-individual-coding-plan",
+    );
     expect(migrateLegacyZcodeProviderId("deepseek")).toBe("deepseek");
   });
 });
 
-// ─── prepareZcodeModelBinding: the per-turn contract ────────────────────────
+// ─── Default chain ────────────────────────────────────────────────────────
+
+describe("resolveZcodeDefaultSelection", () => {
+  const registry = () =>
+    enumerateZcodeRegistry(catalogFixture(), dualFormPersonalConfig(), dualFormCredentials());
+
+  it("no configured default → first registry provider, first model, highest level (the CLI's fallback)", () => {
+    expect(resolveZcodeDefaultSelection(registry(), dualFormPersonalConfig())).toEqual({
+      providerId: ACCOUNT_PROVIDER_ID,
+      providerName: "BigModel Individual Coding Plan",
+      modelId: "GLM-5.3",
+      reasoningLevel: "max",
+    });
+  });
+
+  it("a valid configured default wins, with the legacy providerId migrated", () => {
+    const personal = dualFormPersonalConfig({
+      defaultModelSelection: {
+        providerId: "builtin:bigmodel-coding-plan",
+        modelId: "GLM-5.3-Flash",
+        options: { reasoningLevel: "low" },
+      },
+    });
+    expect(resolveZcodeDefaultSelection(registry(), personal)).toEqual({
+      providerId: ACCOUNT_PROVIDER_ID,
+      providerName: "BigModel Individual Coding Plan",
+      modelId: "GLM-5.3-Flash",
+      reasoningLevel: "low",
+    });
+  });
+
+  it("a configured default on another registry provider is honoured (it still selects)", () => {
+    const personal = dualFormPersonalConfig({
+      defaultModelSelection: { providerId: "deepseek", modelId: "deepseek-flash" },
+    });
+    expect(resolveZcodeDefaultSelection(registry(), personal)).toEqual({
+      providerId: "deepseek",
+      providerName: "DeepSeek",
+      modelId: "deepseek-flash",
+      // CLI-login-written defaults carry no level; the chain completes the
+      // model's highest level.
+      reasoningLevel: "max",
+    });
+  });
+
+  it("a configured default whose provider or level is invalid falls back (never half-applies)", () => {
+    const foreign = dualFormPersonalConfig({
+      defaultModelSelection: { providerId: "gone", modelId: "GLM-5.3", options: { reasoningLevel: "low" } },
+    });
+    expect(resolveZcodeDefaultSelection(registry(), foreign)!.modelId).toBe("GLM-5.3");
+    const badLevel = dualFormPersonalConfig({
+      defaultModelSelection: {
+        providerId: ACCOUNT_PROVIDER_ID,
+        modelId: "GLM-5.3",
+        options: { reasoningLevel: "xhigh" },
+      },
+    });
+    expect(resolveZcodeDefaultSelection(registry(), badLevel)!.reasoningLevel).toBe("max");
+  });
+
+  it("a level-less first model defaults without a reasoningLevel; an empty registry yields null", () => {
+    const catalog = catalogVariant((c) => {
+      (c.config as { modelConfigRules: { modelRules: unknown[] } }).modelConfigRules.modelRules = [];
+    });
+    const providers = enumerateZcodeRegistry(catalog, dualFormPersonalConfig(), dualFormCredentials());
+    expect(resolveZcodeDefaultSelection(providers, dualFormPersonalConfig())).toEqual({
+      providerId: ACCOUNT_PROVIDER_ID,
+      providerName: "BigModel Individual Coding Plan",
+      modelId: "GLM-5.3",
+      reasoningLevel: null,
+    });
+    expect(resolveZcodeDefaultSelection([], dualFormPersonalConfig())).toBeNull();
+  });
+});
+
+// ─── Picker state composition ─────────────────────────────────────────────
+
+describe("readZcodePickerState", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "zcode-picker-test-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("F1: ready, provider-namespaced chips with service-name labels, and the resolved Default", () => {
+    const f = writeFixtureTree(dir);
+    const state = readZcodePickerState({
+      cjsPath: f.cjs,
+      personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
+      cacheRoot: join(dir, "no-cache"),
+    });
+    expect(state.ready).toBe(true);
+    expect(state.reason).toBeNull();
+    expect(state.defaultChoice).toEqual({
+      providerId: ACCOUNT_PROVIDER_ID,
+      providerName: "BigModel Individual Coding Plan",
+      modelId: "GLM-5.3",
+      reasoningLevel: "max",
+    });
+    // Same-name model across providers: distinct ids, service name in label.
+    const glm53Chips = state.options.filter((o) =>
+      o.id.endsWith("/GLM-5.3/low"),
+    );
+    expect(glm53Chips.map((o) => [o.id, o.label])).toEqual([
+      [`${ACCOUNT_PROVIDER_ID}/GLM-5.3/low`, "GLM-5.3 (BigModel Individual Coding Plan, low)"],
+      ["bigmodel-standard-api/GLM-5.3/low", "GLM-5.3 (BigModel API, low)"],
+    ]);
+    // Level-less chips carry no suffix (llama.cpp's Qwen model here has only
+    // the base .* table, so it does have levels; assert its chip shape via
+    // the disabled level instead).
+    expect(state.options).toContainEqual({
+      id: "new-provider/Qwen3.6-35B-A3B/disabled",
+      label: "Qwen3.6-35B-A3B (llama.cpp, disabled)",
+      providerId: "new-provider",
+    });
+    // Team / start / off-peak never appear in any chip id.
+    expect(state.options.every((o) => !/team|start-plan|offpeak/.test(o.id))).toBe(true);
+  });
+
+  it("level-less models produce chips without a level suffix", () => {
+    const f = writeFixtureTree(dir, {
+      catalog: catalogVariant((c) => {
+        (c.config as { modelConfigRules: { modelRules: unknown[] } }).modelConfigRules.modelRules =
+          [];
+      }),
+    });
+    const state = readZcodePickerState({
+      cjsPath: f.cjs,
+      personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
+      cacheRoot: join(dir, "no-cache"),
+    });
+    expect(state.ready).toBe(true);
+    expect(state.options[0]).toEqual({
+      id: `${ACCOUNT_PROVIDER_ID}/GLM-5.3`,
+      label: "GLM-5.3 (BigModel Individual Coding Plan)",
+      providerId: ACCOUNT_PROVIDER_ID,
+    });
+  });
+
+  it("F2 pure API-key machine: ready with the template's models (regression anchor: v2 rejected this shape)", () => {
+    const f = writeFixtureTree(dir, { personal: pureApiKeyPersonalConfig(), credentials: null });
+    const state = readZcodePickerState({
+      cjsPath: f.cjs,
+      personalConfigPath: f.personalPath,
+      credentialsPath: f.credentialsPath,
+      cacheRoot: join(dir, "no-cache"),
+    });
+    expect(state).toMatchObject({ ready: true, reason: null });
+    expect(state.options.map((o) => o.id)).toEqual([
+      "bigmodel-api/GLM-5.3/low",
+      "bigmodel-api/GLM-5.3/high",
+      "bigmodel-api/GLM-5.3/max",
+      "bigmodel-api/GLM-5.3-Flash/low",
+      "bigmodel-api/GLM-5.3-Flash/high",
+      "bigmodel-api/GLM-5.3-Flash/max",
+    ]);
+    expect(state.defaultChoice).toEqual({
+      providerId: "bigmodel-api",
+      providerName: "BigModel Coding Plan",
+      modelId: "GLM-5.3",
+      reasoningLevel: "max",
+    });
+  });
+
+  it("no usable provider anywhere → the single not-ready state with an empty picker", () => {
+    // Keyless personal entries + no credentials: nothing keyed remains.
+    const personal = pureApiKeyPersonalConfig();
+    const rules = (personal.config as {
+      providerConfigRules: { providerRules: Array<Record<string, unknown>> };
+    }).providerConfigRules.providerRules;
+    delete (rules[0]!.config as { access: { apiKey?: string } }).access.apiKey;
+    const f = writeFixtureTree(dir, { personal, credentials: null });
+    expect(
+      readZcodePickerState({
+        cjsPath: f.cjs,
+        personalConfigPath: f.personalPath,
+        credentialsPath: f.credentialsPath,
+        cacheRoot: join(dir, "no-cache"),
+      }),
+    ).toEqual({ ready: false, reason: "no-usable-provider", options: [], defaultChoice: null });
+  });
+
+  it("an unreadable catalog → the same single not-ready state (the CLI cannot boot without it)", () => {
+    const f = writeFixtureTree(dir);
+    rmSync(f.catalogPath, { force: true });
+    expect(
+      readZcodePickerState({
+        cjsPath: f.cjs,
+        personalConfigPath: f.personalPath,
+        credentialsPath: f.credentialsPath,
+        cacheRoot: join(dir, "no-cache"),
+      }),
+    ).toEqual({ ready: false, reason: "no-usable-provider", options: [], defaultChoice: null });
+  });
+});
+
+// ─── prepareZcodeModelBinding: the per-turn contract ──────────────────────
 
 describe("prepareZcodeModelBinding", () => {
   let dir: string;
@@ -544,205 +740,215 @@ describe("prepareZcodeModelBinding", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function fixtureTree(extraPersonalConfig: Record<string, unknown> = {}): {
-    cjs: string;
-    settingPath: string;
-    personalPath: string;
-    credentialsPath: string;
-    attachDir: string;
-  } {
-    const { cjs } = (function writeInstall() {
-      const install = join(dir, "install");
-      mkdirSync(join(install, "resources", "glm"), { recursive: true });
-      mkdirSync(join(install, "resources", "config", "provider"), { recursive: true });
-      const cjsPath = join(install, "resources", "glm", "zcode.cjs");
-      writeFileSync(cjsPath, "");
-      writeFileSync(
-        join(install, "resources", "config", "provider", "zcode-builtin.json"),
-        JSON.stringify(catalogFixture()),
-      );
-      return { cjs: cjsPath };
-    })();
-    const settingPath = join(dir, "setting.json");
-    writeFileSync(settingPath, JSON.stringify(MODERN_SETTING));
-    const personalPath = join(dir, "provider_config.json");
-    writeFileSync(personalPath, JSON.stringify(personalConfigFixture(extraPersonalConfig)));
-    // Mirrors the GUI-written credential keys: an oauth login token plus the
-    // coding-plan api-key key the identity bridge derives from (values are
-    // opaque; only key names matter to the adapter).
-    const credentialsPath = join(dir, "credentials.json");
-    writeFileSync(credentialsPath, JSON.stringify({
-      "oauth:bigmodel:access_token": "enc:v1:fake",
-      "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:41641738601171874:api-key": "enc:v1:fake",
-      "account-provider:coding-plan:account:bigmodel-team-coding-plan:account:41641738601171874:api-key": "enc:v1:fake",
-    }));
-    const attachDir = join(dir, "attach");
-    mkdirSync(attachDir, { recursive: true });
-    return { cjs, settingPath, personalPath, credentialsPath, attachDir };
-  }
+  const baseOverrides = (f: FixtureTree) => ({
+    personalConfigPath: f.personalPath,
+    credentialsPath: f.credentialsPath,
+    cacheRoot: join(dir, "no-cache"),
+  });
 
-  it("explicit pick: writes the exact selection into a temp clone; the real config file is untouched (zero-write snapshot)", () => {
-    const f = fixtureTree();
-    const before = readFileSync(f.personalPath, "utf8");
-    const credsFixture = JSON.parse(readFileSync(f.credentialsPath, "utf8")) as Record<string, string>;
+  it("explicit account pick: exact selection into a temp clone; both real files byte-identical (zero-write)", () => {
+    const f = writeFixtureTree(dir);
+    const personalBefore = readFileSync(f.personalPath, "utf8");
+    const credentialsBefore = readFileSync(f.credentialsPath, "utf8");
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
-      model: "GLM-5.2/high",
+      model: `${ACCOUNT_PROVIDER_ID}/GLM-5.3/high`,
       attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
+      ...baseOverrides(f),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.selection).toEqual({
-      providerId: "account:bigmodel-individual-coding-plan",
-      modelId: "GLM-5.2",
+      providerId: ACCOUNT_PROVIDER_ID,
+      modelId: "GLM-5.3",
       reasoningLevel: "high",
     });
-    expect(result.builtinCatalogPath).toBe(
-      join(dirname(dirname(f.cjs)), "config", "provider", "zcode-builtin.json"),
-    );
+    expect(result.builtinCatalogPath).toBe(f.catalogPath);
     const clone = JSON.parse(readFileSync(result.clonePath, "utf8")) as {
       config: { defaultModelSelection: unknown; providerOrder: string[] };
     };
     expect(clone.config.defaultModelSelection).toEqual({
-      providerId: "account:bigmodel-individual-coding-plan",
-      modelId: "GLM-5.2",
+      providerId: ACCOUNT_PROVIDER_ID,
+      modelId: "GLM-5.3",
       options: { reasoningLevel: "high" },
     });
     // The clone keeps the rest of the personal config (provider rules ride along).
-    expect(clone.config.providerOrder).toEqual(["new-provider", "deepseek", "00000000-1111-4222-8333-444444444444"]);
-    // Zero-write contract: the user's real file is byte-identical.
-    expect(readFileSync(f.personalPath, "utf8")).toBe(before);
-
-    // Identity bridge: the real credential store gains exactly the
-    // one identity key (plaintext, derived from the GUI's own api-key key
-    // name; the headless registry materializes account providers only with
-    // it); every pre-existing key and value is untouched, and a second
-    // preparation with the key already present writes nothing (idempotent).
-    const credsAfter = JSON.parse(readFileSync(f.credentialsPath, "utf8")) as Record<string, string>;
-    expect(credsAfter).toEqual({
-      ...credsFixture,
-      "account-provider:account:bigmodel-individual-coding-plan:identity": "41641738601171874",
-    });
-    // Idempotent: re-prepare → no further change (byte-stable).
-    const second = prepareZcodeModelBinding({
-      cjsPath: f.cjs,
-      model: "GLM-5.2/high",
-      attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
-    });
-    expect(second.ok).toBe(true);
-    expect(readFileSync(f.credentialsPath, "utf8")).toBe(
-      JSON.stringify(credsAfter, null, 2),
-    );
+    expect(clone.config.providerOrder).toEqual([
+      "deepseek",
+      "bigmodel-standard-api",
+      "new-provider",
+      WECHAT_PROVIDER_ID,
+    ]);
+    // Zero-write contract: the user's real files are untouched (the paired
+    // identity key already exists, so the bridge writes nothing).
+    expect(readFileSync(f.personalPath, "utf8")).toBe(personalBefore);
+    expect(readFileSync(f.credentialsPath, "utf8")).toBe(credentialsBefore);
   });
 
-  it("identity bridge skips writing when the key already exists (zcode-login users)", () => {
-    const f = fixtureTree();
-    writeFileSync(f.credentialsPath, JSON.stringify({
-      "oauth:bigmodel:access_token": "enc:v1:fake",
-      "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:41641738601171874:api-key": "enc:v1:fake",
-      "account-provider:account:bigmodel-individual-coding-plan:identity": "41641738601171874",
-    }));
+  it("default pick → the registry default (first provider, first model, highest level)", () => {
+    const f = writeFixtureTree(dir);
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.selection).toEqual({
+      providerId: ACCOUNT_PROVIDER_ID,
+      modelId: "GLM-5.3",
+      reasoningLevel: "max",
+    });
+  });
+
+  it("default pick honours a valid CLI-written configured default (legacy id migrated)", () => {
+    const f = writeFixtureTree(dir, {
+      personal: dualFormPersonalConfig({
+        defaultModelSelection: {
+          providerId: "builtin:bigmodel-coding-plan",
+          modelId: "GLM-5.3-Flash",
+          options: { reasoningLevel: "low" },
+        },
+      }),
+    });
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.selection).toEqual({
+      providerId: ACCOUNT_PROVIDER_ID,
+      modelId: "GLM-5.3-Flash",
+      reasoningLevel: "low",
+    });
+  });
+
+  it("a level-less model binds without a reasoningLevel; the clone omits the option", () => {
+    const f = writeFixtureTree(dir, {
+      catalog: catalogVariant((c) => {
+        (c.config as { modelConfigRules: { modelRules: unknown[] } }).modelConfigRules.modelRules =
+          [];
+      }),
+    });
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: "new-provider/Qwen3.6-35B-A3B",
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.selection).toEqual({
+      providerId: "new-provider",
+      modelId: "Qwen3.6-35B-A3B",
+      reasoningLevel: null,
+    });
+    const clone = JSON.parse(readFileSync(result.clonePath, "utf8")) as {
+      config: { defaultModelSelection: unknown };
+    };
+    expect(clone.config.defaultModelSelection).toEqual({
+      providerId: "new-provider",
+      modelId: "Qwen3.6-35B-A3B",
+    });
+  });
+
+  it("a model id containing '/' splits by validation (openrouter-style custom provider)", () => {
+    const personal = dualFormPersonalConfig();
+    (personal.config as { providerConfigRules: { providerRules: unknown[] } }).providerConfigRules
+      .providerRules.push({
+        providerId: "my-router",
+        providerName: "My OpenRouter",
+        config: {
+          group: "standard-personal",
+          access: { type: "api-key", apiKey: "fixture-router-key" },
+          personalModelIds: ["anthropic/claude-fable-5.1", "deepseek/deepseek-v4-pro"],
+        },
+      });
+    const f = writeFixtureTree(dir, { personal });
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: "my-router/anthropic/claude-fable-5.1/high",
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.selection).toEqual({
+      providerId: "my-router",
+      modelId: "anthropic/claude-fable-5.1",
+      reasoningLevel: "high",
+    });
+    // Level-less variant of the same slash id.
+    const levelless = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: "my-router/anthropic/claude-fable-5.1",
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(levelless.ok && levelless.selection.reasoningLevel).toBeNull();
+  });
+
+  it("identity bridge (add-only): an explicit account pick with the api-key key but no identity key gains exactly that key", () => {
+    const credentials = dualFormCredentials();
+    delete credentials[`account-provider:${ACCOUNT_PROVIDER_ID}:identity`];
+    const f = writeFixtureTree(dir, { credentials });
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: `${ACCOUNT_PROVIDER_ID}/GLM-5.3/high`,
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(result.ok).toBe(true);
+    const after = JSON.parse(readFileSync(f.credentialsPath, "utf8")) as Record<string, string>;
+    expect(after).toEqual({
+      ...credentials,
+      // The identity value is the account id embedded in the GUI's own
+      // api-key key name; nothing else changed.
+      [`account-provider:${ACCOUNT_PROVIDER_ID}:identity`]: ACCOUNT_ID,
+    });
+    // Idempotent: a second preparation finds the key and writes nothing.
+    const second = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: `${ACCOUNT_PROVIDER_ID}/GLM-5.3/high`,
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(second.ok).toBe(true);
+    expect(readFileSync(f.credentialsPath, "utf8")).toBe(JSON.stringify(after, null, 2));
+  });
+
+  it("personal targets never touch the credential store (snapshot compare)", () => {
+    const f = writeFixtureTree(dir);
     const before = readFileSync(f.credentialsPath, "utf8");
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
-      model: "GLM-5.2/high",
+      model: "deepseek/deepseek-v4-pro/max",
       attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
+      ...baseOverrides(f),
     });
     expect(result.ok).toBe(true);
     expect(readFileSync(f.credentialsPath, "utf8")).toBe(before);
   });
 
-  it("no coding-plan api-key credential → credentials-missing refusal (identity bridge has no raw material)", () => {
-    const f = fixtureTree();
-    writeFileSync(f.credentialsPath, JSON.stringify({ "oauth:bigmodel:access_token": "enc:v1:fake" }));
+  it("a stale identity value (names no api-key key) refuses with provider-no-access and writes nothing", () => {
+    const credentials = dualFormCredentials();
+    credentials[`account-provider:${ACCOUNT_PROVIDER_ID}:identity`] = "10000000000000009";
+    const f = writeFixtureTree(dir, { credentials });
+    const before = readFileSync(f.credentialsPath, "utf8");
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
+      model: `${ACCOUNT_PROVIDER_ID}/GLM-5.3/high`,
       attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
+      ...baseOverrides(f),
     });
-    expect(result).toMatchObject({ ok: false, code: "credentials-missing" });
-    if (result.ok) return;
-    expect(result.message).toContain("log in to your Coding Plan");
-  });
-
-  it("default pick without a configured default → plan's first model + last level (completeNewModelSelection convention)", () => {
-    const f = fixtureTree();
-    const result = prepareZcodeModelBinding({
-      cjsPath: f.cjs,
-      attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.selection).toEqual({
-      providerId: "account:bigmodel-individual-coding-plan",
-      modelId: "GLM-5.2",
-      reasoningLevel: "max",
-    });
-  });
-
-  it("default pick honours the GUI's own defaultModelSelection when it validly targets the plan (legacy id migrated)", () => {
-    const f = fixtureTree({
-      defaultModelSelection: {
-        providerId: "builtin:bigmodel-coding-plan",
-        modelId: "GLM-5.2",
-        options: { reasoningLevel: "high" },
-      },
-    });
-    const result = prepareZcodeModelBinding({
-      cjsPath: f.cjs,
-      attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.selection).toEqual({
-      providerId: "account:bigmodel-individual-coding-plan",
-      modelId: "GLM-5.2",
-      reasoningLevel: "high",
-    });
-  });
-
-  it("a configured default targeting another provider falls back to the plan default", () => {
-    const f = fixtureTree({
-      defaultModelSelection: { providerId: "deepseek", modelId: "deepseek-chat", options: { reasoningLevel: "high" } },
-    });
-    const result = prepareZcodeModelBinding({
-      cjsPath: f.cjs,
-      attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.selection.providerId).toBe("account:bigmodel-individual-coding-plan");
+    expect(result).toMatchObject({ ok: false, code: "provider-no-access" });
+    expect(readFileSync(f.credentialsPath, "utf8")).toBe(before);
   });
 
   it("each refusal link fires with an actionable message", () => {
-    const f = fixtureTree();
+    const f = writeFixtureTree(dir);
     const base = {
       cjsPath: f.cjs,
       attachDir: f.attachDir,
@@ -750,82 +956,113 @@ describe("prepareZcodeModelBinding", () => {
       credentialsPath: f.credentialsPath,
       cacheRoot: join(dir, "no-cache"),
     };
-    // 1. GUI keys missing.
-    const noSetting = prepareZcodeModelBinding({ ...base, settingPath: join(dir, "no-setting.json") });
-    expect(noSetting).toMatchObject({ ok: false, code: "gui-keys-missing" });
-    // 2. Catalog unreadable (install file removed, no cache).
-    rmSync(join(dirname(dirname(f.cjs)), "config", "provider", "zcode-builtin.json"), { force: true });
-    const noCatalog = prepareZcodeModelBinding({ ...base, settingPath: f.settingPath });
+    // 1. Catalog unreadable (install file removed, no cache).
+    rmSync(f.catalogPath, { force: true });
+    const noCatalog = prepareZcodeModelBinding({ ...base });
     expect(noCatalog).toMatchObject({ ok: false, code: "catalog-unreadable" });
-    // Restore for the remaining links.
-    writeFileSync(
-      join(dirname(dirname(f.cjs)), "config", "provider", "zcode-builtin.json"),
-      JSON.stringify(catalogFixture()),
-    );
-    // 3. Model not in plan.
-    const notInPlan = prepareZcodeModelBinding({ ...base, settingPath: f.settingPath, model: "GLM-9/high" });
-    expect(notInPlan).toMatchObject({ ok: false, code: "model-not-in-plan" });
-    // 4. Level required but unavailable.
-    const badLevel = prepareZcodeModelBinding({ ...base, settingPath: f.settingPath, model: "GLM-5.2/medium" });
-    expect(badLevel).toMatchObject({ ok: false, code: "level-unavailable" });
-    // 5. Personal config unreadable.
+    writeFileSync(f.catalogPath, JSON.stringify(catalogFixture()));
+    // 2. Provider config unreadable.
     const noPersonal = prepareZcodeModelBinding({
       ...base,
-      settingPath: f.settingPath,
       personalConfigPath: join(dir, "no-personal.json"),
     });
-    expect(noPersonal).toMatchObject({ ok: false, code: "personal-config-unreadable" });
-    // Every refusal message carries an action (retry / pick again guidance).
-    for (const r of [noSetting, noCatalog, notInPlan, badLevel, noPersonal]) {
+    expect(noPersonal).toMatchObject({ ok: false, code: "provider-config-unreadable" });
+    // 3. No usable provider at all (keyless F2 + no credentials).
+    const keyless = pureApiKeyPersonalConfig();
+    delete (
+      (keyless.config as { providerConfigRules: { providerRules: Array<Record<string, unknown>> } })
+        .providerConfigRules.providerRules[0]!.config as { access: { apiKey?: string } }
+    ).access.apiKey;
+    const keylessPath = join(dir, "keyless-personal.json");
+    writeFileSync(keylessPath, JSON.stringify(keyless));
+    const none = prepareZcodeModelBinding({
+      ...base,
+      personalConfigPath: keylessPath,
+      credentialsPath: join(dir, "no-credentials.json"),
+    });
+    expect(none).toMatchObject({ ok: false, code: "no-usable-provider" });
+    // 4. Account provider known, api-key credential missing.
+    const noApiKey = dualFormCredentials();
+    delete noApiKey[`account-provider:coding-plan:${ACCOUNT_PROVIDER_ID}:account:${ACCOUNT_ID}:api-key`];
+    delete noApiKey[`account-provider:${ACCOUNT_PROVIDER_ID}:identity`];
+    const noApiKeyPath = join(dir, "no-apikey.json");
+    writeFileSync(noApiKeyPath, JSON.stringify(noApiKey));
+    const unauthorized = prepareZcodeModelBinding({
+      ...base,
+      credentialsPath: noApiKeyPath,
+      model: `${ACCOUNT_PROVIDER_ID}/GLM-5.3/high`,
+    });
+    expect(unauthorized).toMatchObject({ ok: false, code: "provider-no-access" });
+    // 5. Model not on the provider (and a bare v2-era stale id).
+    const notOnProvider = prepareZcodeModelBinding({
+      ...base,
+      model: `${ACCOUNT_PROVIDER_ID}/GLM-9/high`,
+    });
+    expect(notOnProvider).toMatchObject({ ok: false, code: "model-not-on-provider" });
+    const staleBare = prepareZcodeModelBinding({ ...base, model: "GLM-5.3" });
+    expect(staleBare).toMatchObject({ ok: false, code: "model-not-on-provider" });
+    // 6. Level unsupported for the model.
+    const badLevel = prepareZcodeModelBinding({
+      ...base,
+      model: `${ACCOUNT_PROVIDER_ID}/GLM-5.3/medium`,
+    });
+    expect(badLevel).toMatchObject({ ok: false, code: "level-unsupported" });
+    // Every refusal message carries an action and the ZCode: prefix.
+    for (const r of [noCatalog, noPersonal, none, unauthorized, notOnProvider, staleBare, badLevel]) {
       expect(r.ok).toBe(false);
       if (r.ok) continue;
-      expect(r.message).toMatch(/[Rr]etry\.|[Rr]escan|[Pp]ick again/);
+      expect(r.message).toMatch(/[Rr]etry\.|[Rr]escan|[Pp]ick again|log in/);
       expect(r.message.startsWith("ZCode:")).toBe(true);
     }
   });
 
-  it("refuses when the plan's only model has no level table (reasoning-level-missing would silently fall back)", () => {
-    const f = fixtureTree();
-    const catalog = catalogFixture() as { config: { modelConfigRules: { modelRules: unknown[] } } };
-    catalog.config.modelConfigRules.modelRules = []; // no rules → no levels
+  it("a personal provider that exists but is not usable refuses with provider-no-access (not a stale pick)", () => {
+    const personal = dualFormPersonalConfig();
+    const deepseek = (personal.config as {
+      providerConfigRules: { providerRules: Array<Record<string, unknown>> };
+    }).providerConfigRules.providerRules.find((r) => r.providerId === "deepseek") as {
+      config: { access: { apiKey?: string } };
+    };
+    delete deepseek.config.access.apiKey;
+    const f = writeFixtureTree(dir, { personal });
+    const result = prepareZcodeModelBinding({
+      cjsPath: f.cjs,
+      model: "deepseek/deepseek-flash/max",
+      attachDir: f.attachDir,
+      ...baseOverrides(f),
+    });
+    expect(result).toMatchObject({ ok: false, code: "provider-no-access" });
+  });
+
+  it("setting.json is not part of the contract: a stale plan-era file changes nothing", () => {
+    const f = writeFixtureTree(dir);
+    // v2-era keys; v3 never reads this file.
     writeFileSync(
-      join(dirname(dirname(f.cjs)), "config", "provider", "zcode-builtin.json"),
-      JSON.stringify(catalog),
+      join(dir, "setting.json"),
+      JSON.stringify({
+        providerFamilyDomain: "zai",
+        modelProviderFamilySelectedKeys: { bigmodel: "coding-plan:builtin:bigmodel-coding-plan" },
+      }),
     );
     const result = prepareZcodeModelBinding({
       cjsPath: f.cjs,
       attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
+      ...baseOverrides(f),
     });
-    expect(result).toMatchObject({ ok: false, code: "level-unavailable" });
-  });
-
-  it("a bare model id (legacy persisted pick, no level suffix) refuses; the default is never bound silently", () => {
-    const f = fixtureTree();
-    const result = prepareZcodeModelBinding({
-      cjsPath: f.cjs,
-      model: "GLM-5.2",
-      attachDir: f.attachDir,
-      settingPath: f.settingPath,
-      personalConfigPath: f.personalPath,
-      credentialsPath: f.credentialsPath,
-      cacheRoot: join(dir, "no-cache"),
-    });
-    expect(result).toMatchObject({ ok: false, code: "model-not-in-plan" });
-    if (result.ok) return;
-    expect(result.message).toContain("stale or malformed");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The zai keys in setting.json cannot steer anything: the registry
+    // default is still the paired bigmodel plan.
+    expect(result.selection.providerId).toBe(ACCOUNT_PROVIDER_ID);
   });
 });
 
-// ─── The binding discriminator ────────────────────────────────────────
+// ─── The binding discriminator ────────────────────────────────────────────
 //
-// A mis-bound fresh turn silently reroutes to the first personal provider and
-// fails at its gateway (ProviderBusinessError 400, exit 1); a correctly bound
-// turn completes (resultType success, exit 0). Both arms are pinned below
-// with fixtures captured from real CLI runs.
+// A mis-bound fresh turn silently reroutes to the first personal provider
+// and fails at its gateway (ProviderBusinessError 400, exit 1); a correctly
+// bound turn completes (resultType success, exit 0). Both arms are pinned
+// below with fixtures captured from real CLI runs.
 
 describe("binding discriminator (verified)", () => {
   const wrongBindingStderr = readFileSync(
@@ -839,10 +1076,10 @@ describe("binding discriminator (verified)", () => {
     "utf8",
   );
 
-  it("the wrong-binding evidence: gateway 400 on reasoning_effort='max' routed to a non-plan provider", () => {
+  it("the wrong-binding evidence: gateway 400 on a reasoning level routed to a non-plan provider", () => {
     expect(wrongBindingStderr).toContain("providerCode: 400");
     expect(wrongBindingStderr).toContain("'input': 'max'");
-    expect(wrongBindingStderr).toContain("providerId: '00000000-1111-4222-8333-444444444444'");
+    expect(wrongBindingStderr).toContain(`providerId: '${WECHAT_PROVIDER_ID}'`);
   });
 
   it("the right-binding evidence: a bound turn completes (resultType success, exit 0)", () => {
@@ -856,52 +1093,26 @@ describe("binding discriminator (verified)", () => {
     expect(result?.response).toBe("PROBE_OK");
   });
 
-  it("the binding we write is the verified-good shape: plan provider + explicit level, never the fallback provider", () => {
+  it("the binding we write is the verified-good shape: registry provider + explicit level, never the fallback provider", () => {
     const dir = mkdtempSync(join(tmpdir(), "zcode-discriminator-"));
     try {
-      const install = join(dir, "install");
-      mkdirSync(join(install, "resources", "glm"), { recursive: true });
-      mkdirSync(join(install, "resources", "config", "provider"), { recursive: true });
-      const cjs = join(install, "resources", "glm", "zcode.cjs");
-      writeFileSync(cjs, "");
-      writeFileSync(
-        join(install, "resources", "config", "provider", "zcode-builtin.json"),
-        JSON.stringify(catalogFixture()),
-      );
-      const settingPath = join(dir, "setting.json");
-      // A captured machine state: legacy keys + bigmodel logged in
-      // (credentials key names are the login signal that resolves the family).
-      writeFileSync(settingPath, JSON.stringify(LEGACY_SETTING));
-      const credentialsPath = join(dir, "credentials.json");
-      // Captured credentials: bigmodel login + the GUI-written coding-plan
-      // api-key key (the identity bridge's raw material).
-      writeFileSync(credentialsPath, JSON.stringify({
-        "oauth:bigmodel:access_token": "enc:x",
-        "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:41641738601171874:api-key": "enc:x",
-      }));
-      const personalPath = join(dir, "provider_config.json");
-      writeFileSync(personalPath, JSON.stringify(personalConfigFixture()));
-      const attachDir = join(dir, "attach");
-      mkdirSync(attachDir, { recursive: true });
-
+      const f = writeFixtureTree(dir);
       const result = prepareZcodeModelBinding({
-        cjsPath: cjs,
-        // The picker choice the success arm exercised: GLM-5.2 at 'high'.
-        model: encodeZcodeModelChoice("GLM-5.2", "high"),
-        attachDir,
-        settingPath,
-        personalConfigPath: personalPath,
-        credentialsPath,
+        cjsPath: f.cjs,
+        model: encodeZcodeModelChoice(ACCOUNT_PROVIDER_ID, "GLM-5.3", "high"),
+        attachDir: f.attachDir,
+        personalConfigPath: f.personalPath,
+        credentialsPath: f.credentialsPath,
         cacheRoot: join(dir, "no-cache"),
       });
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      // The verified-good triple (exit 0)…
-      expect(result.selection.providerId).toBe("account:bigmodel-individual-coding-plan");
-      expect(result.selection.modelId).toBe("GLM-5.2");
+      // The registry triple (provider, model, explicit level)…
+      expect(result.selection.providerId).toBe(ACCOUNT_PROVIDER_ID);
+      expect(result.selection.modelId).toBe("GLM-5.3");
       expect(result.selection.reasoningLevel).toBe("high");
       // …and never the 400-ing fallback provider from the stderr fixture.
-      expect(result.selection.providerId).not.toBe("00000000-1111-4222-8333-444444444444");
+      expect(result.selection.providerId).not.toBe(WECHAT_PROVIDER_ID);
       expect(wrongBindingStderr).not.toContain(result.selection.providerId);
     } finally {
       rmSync(dir, { recursive: true, force: true });

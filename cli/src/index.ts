@@ -716,9 +716,7 @@ function handleAgents(): void {
     // ZCode installed is not the same as ready; print the guidance line too.
     if (a.available && a.ready === false) {
       console.log(
-        a.notReadyReason === "gui-not-initialized"
-          ? "      never opened: open the ZCode GUI once, log in and pick a model, then re-run"
-          : "      not logged in / no model selected: open the ZCode GUI, log in and pick a model, then re-run",
+        "      no usable provider: open ZCode, log in or add a model provider, then re-run",
       );
     }
   }

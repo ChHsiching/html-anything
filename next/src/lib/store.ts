@@ -26,9 +26,10 @@ export type AgentInfo = {
   /** True for ACP / pi-rpc adapters where Convert returns a friendly error. */
   unsupported?: boolean;
   /**
-   * ZCode-only: installed is not the same as ready. True when the GUI plan
-   * resolves and its family is logged in. False + notReadyReason renders the
-   * amber "已安装 · 未就绪" card state. Absent for every other agent.
+   * ZCode-only: installed is not the same as ready. True when the registry
+   * mirror holds at least one usable provider (a paired Coding Plan or a
+   * keyed personal provider). False + notReadyReason renders the amber
+   * "已安装 · 未就绪" card state. Absent for every other agent.
    */
   ready?: boolean;
   notReadyReason?: import("./agents/zcode-model-binding").ZcodeNotReadyReason;

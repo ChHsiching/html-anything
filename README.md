@@ -211,7 +211,7 @@ If you've already done `claude login` / `cursor login` / `gemini auth` in your t
 
 ### ZCode specifics
 
-- **Model selection follows the ZCode GUI** — The ZCode picker lists the models and reasoning levels of the plan selected in the desktop app; `Default` follows that plan's current default. Switch plans in ZCode, then re-scan in Settings; if the model binding breaks, generation fails with a clear error, and html-anything never quietly swaps models.
+- **Model selection mirrors ZCode's own provider registry** — The picker lists every service ZCode can use (your Coding Plan plus each keyed personal provider, e.g. DeepSeek, local gateways), in the order you arranged in ZCode; `Default` follows ZCode's own default model. If the model binding breaks, generation fails with a clear error, and html-anything never quietly swaps providers.
 - **Attachment size cap** — html-anything sends the full prompt as an attached `.md` file; ZCode reads up to **256 KB / 2000 lines** and truncates longer input.
 - **Per-turn cost follows your plugin config** — ZCode loads your plugins on every turn; we measured ~100k extra input tokens and ~18 s per turn on a heavy setup, and plugin artifacts may appear next to the output. Trim plugins on the ZCode side if turns run slow; html-anything writes exactly one thing to ZCode: a login-identity key in its credential store.
 - **Sessions stay in ZCode** — Every generated session remains in the ZCode GUI; open the workspace for that generation folder to continue it.
