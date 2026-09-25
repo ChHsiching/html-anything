@@ -434,7 +434,7 @@ const en: Dict = {
   "model.label": "Pick a model for {agent}",
   "model.defaultHint.prefix": "Default omits ",
   "model.defaultHint.suffix": " and lets the CLI pick.",
-  "model.defaultHint.zcode": "Default follows ZCode's own default model.",
+  "model.defaultHint.zcode": "Default uses the first model in the list.",
   "model.defaultLabel": "Default (CLI config)",
   "model.staleNotice": "The saved model is no longer in this agent's list; reverted to Default.",
 
@@ -802,7 +802,7 @@ const zhCN: Dict = {
   "model.label": "为 {agent} 选个模型",
   "model.defaultHint.prefix": "选 Default 时不传 ",
   "model.defaultHint.suffix": ", 由 CLI 自己挑",
-  "model.defaultHint.zcode": "选 Default 时跟随 ZCode 自身的默认模型。",
+  "model.defaultHint.zcode": "选 Default 时用列表里的第一个模型。",
   "model.defaultLabel": "Default (CLI config)",
   "model.staleNotice": "保存的模型已不在该 agent 列表中，已回退为 Default。",
 
