@@ -100,11 +100,21 @@ describe('useConvert().run', () => {
   let root: Root | null = null;
   let container: HTMLElement | null = null;
   let api: ReturnType<typeof useConvert> | null = null;
+  let renderCount = 0;
 
-  // useConvert is a hook — render a null harness once per test to capture it
+  // useConvert is a hook — render a null harness once per test to capture it.
+  // RenderProbe subscribes to the active task's log length, so renderCount
+  // tracks how many store batches React committed, not how many events
+  // arrived — the bounded quantity the batching fix exists to guarantee.
+  function RenderProbe() {
+    useStore((s) => s.tasks.find((t) => t.id === s.activeTaskId)?.log.length ?? 0);
+    renderCount++;
+    return null;
+  }
+
   function Harness() {
     api = useConvert();
-    return null;
+    return createElement(RenderProbe);
   }
 
   function sseFrame(event: string, data: unknown) {
@@ -174,6 +184,7 @@ describe('useConvert().run', () => {
 
   beforeEach(() => {
     localStorage.clear();
+    renderCount = 0;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -269,5 +280,26 @@ describe('useConvert().run', () => {
     expect(modelIdx).toBeGreaterThanOrEqual(0);
     expect(sessionIdx).toBeGreaterThan(modelIdx);
     expect(cancelIdx).toBeGreaterThan(sessionIdx);
+  });
+
+  it('delivers every event of a high-rate meta burst while keeping re-renders bounded', async () => {
+    const taskId = useStore.getState().newTask({ name: 'burst' });
+    // one network chunk carrying 200 meta frames — the burst shape from the
+    // issue. Unfixed code re-renders the full task list once per event; the
+    // batcher must land all 200 in a handful of store batches.
+    const burst = Array.from({ length: 200 }, (_, i) =>
+      sseFrame('meta', { key: 'model', value: `m${i}` }),
+    ).join('');
+    stubStreamFetch([burst, sseFrame('done', { code: 0 })]);
+    await renderHarness();
+
+    await act(async () => {
+      await api!.run(runReq(taskId));
+    });
+
+    const task = taskOf(taskId);
+    expect(task.status).toBe('done');
+    expect(task.log.filter((l) => l.kind === 'meta')).toHaveLength(200);
+    expect(renderCount).toBeLessThanOrEqual(10);
   });
 });
