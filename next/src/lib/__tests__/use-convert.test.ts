@@ -249,6 +249,29 @@ describe('useConvert().run', () => {
     expect(task.baseHtml).toBe(task.html);
   });
 
+  it('marks the task errored without committing a baseline when the stream ends with error', async () => {
+    const taskId = useStore.getState().newTask({ name: 'error-terminal' });
+    stubStreamFetch([
+      sseFrame('start', { bin: '/usr/bin/agent', promptBytes: 12 }),
+      sseFrame('delta', { text: '<p>partial' }),
+      sseFrame('error', { message: 'agent binary not found' }),
+    ]);
+    await renderHarness();
+
+    await act(async () => {
+      await api!.run(runReq(taskId));
+    });
+
+    const task = taskOf(taskId);
+    expect(task.status).toBe('error');
+    expect(task.log.some((l) => l.kind === 'error' && l.text === 'agent binary not found')).toBe(true);
+    // streamed data stays visible …
+    expect(task.html).toBe('<p>partial');
+    // … but the partial HTML must not be committed as the diff-edit baseline
+    expect(task.baseHtml).toBeUndefined();
+    expect(task.log.some((l) => l.kind === 'done')).toBe(false);
+  });
+
   it('lands buffered events in order before the 已取消 log when cancelled mid-stream', async () => {
     const taskId = useStore.getState().newTask({ name: 'cancel' });
     const probe = stubStreamFetch(

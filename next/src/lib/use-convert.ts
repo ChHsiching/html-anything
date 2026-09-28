@@ -146,9 +146,11 @@ export function useConvert() {
           : `准备调用 ${req.agent}${useModel ? ` · 模型 ${useModel}` : ""} · 模板 ${req.templateId} · ${sizeNote}`,
       });
 
-      let sawTerminal = false;
+      // which terminal event the stream carried, if any — done and error need
+      // different finishing (below): a failed run must not read as success
+      let terminalEvent: "done" | "error" | null = null;
       const batch = createEventBatcher((event, data) => {
-        if (event === 'done' || event === 'error') sawTerminal = true;
+        if (event === "done" || event === "error") terminalEvent = event;
         handleEvent(taskId, event, data, startedAt);
       });
 
@@ -198,13 +200,19 @@ export function useConvert() {
           }
         }
         batch.flush();
-        if (sawTerminal) {
+        if (terminalEvent === "done") {
           const endedAt = Date.now();
           useStore.getState().patchStatsFor(taskId, { endedAt, durationMs: endedAt - startedAt });
           useStore.getState().setStatusFor(taskId, "done");
           // record the just-finished (content, html) as the new diff-edit baseline
           // so the user's next edit goes through diff mode instead of full regen
           useStore.getState().commitBaseFor(taskId);
+        } else if (terminalEvent === "error") {
+          // the server emits exactly one error event and closes (unknown agent,
+          // missing binary, crashed child). Keep whatever streamed for
+          // debugging and fail the run — a partial document must not become
+          // the next diff-edit baseline, so commitBaseFor is skipped.
+          useStore.getState().setStatusFor(taskId, "error");
         } else if (ctl.signal.aborted) {
           // user cancelled mid-stream: cancel() already set the task idle and
           // the catch arm below wrote the log line — nothing left to finish
