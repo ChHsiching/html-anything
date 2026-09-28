@@ -150,7 +150,12 @@ export function useConvert() {
       // different finishing (below): a failed run must not read as success
       let terminalEvent: "done" | "error" | null = null;
       const batch = createEventBatcher((event, data) => {
-        if (event === "done" || event === "error") terminalEvent = event;
+        if (event === "done" || event === "error") {
+          // error wins once seen: openclaw's close handler emits error for an
+          // empty response or a JSON parse failure and then an unconditional
+          // done — the trailing done must not mask the failure
+          if (event === "error" || terminalEvent === null) terminalEvent = event;
+        }
         handleEvent(taskId, event, data, startedAt);
       });
 

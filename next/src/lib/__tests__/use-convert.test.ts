@@ -272,6 +272,39 @@ describe('useConvert().run', () => {
     expect(task.log.some((l) => l.kind === 'done')).toBe(false);
   });
 
+  it('keeps the previous baseline and error status when error is followed by done', async () => {
+    // openclaw's close handler emits error for an empty response or a JSON
+    // parse failure, then an unconditional done — the trailing done must not
+    // turn the failed run into a success (invoke.ts child close handler)
+    const taskId = useStore.getState().newTask({ name: 'error-then-done' });
+    useStore.setState((st) => ({
+      tasks: st.tasks.map((t) =>
+        t.id === taskId ? { ...t, baseContent: 'old content', baseHtml: '<p>old base</p>' } : t,
+      ),
+    }));
+    stubStreamFetch([
+      sseFrame('start', { bin: '/usr/bin/agent', promptBytes: 12 }),
+      sseFrame('delta', { text: '<p>partial' }),
+      sseFrame('error', { message: 'OpenClaw returned an empty assistant message' }),
+      sseFrame('done', { code: 0 }),
+    ]);
+    await renderHarness();
+
+    await act(async () => {
+      await api!.run(runReq(taskId));
+    });
+
+    const task = taskOf(taskId);
+    expect(task.status).toBe('error');
+    expect(task.log.some((l) => l.kind === 'error' && l.text === 'OpenClaw returned an empty assistant message')).toBe(true);
+    // the done frame still lands in the log …
+    expect(task.log.some((l) => l.kind === 'done' && l.text.includes('agent 进程退出'))).toBe(true);
+    // … streamed data stays visible, and the previous baseline survives
+    expect(task.html).toBe('<p>partial');
+    expect(task.baseHtml).toBe('<p>old base</p>');
+    expect(task.baseContent).toBe('old content');
+  });
+
   it('lands buffered events in order before the 已取消 log when cancelled mid-stream', async () => {
     const taskId = useStore.getState().newTask({ name: 'cancel' });
     const probe = stubStreamFetch(
