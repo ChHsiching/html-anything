@@ -88,7 +88,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 /** Narrow `unknown` to a plain JSON object: not null, not an array. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -208,7 +208,10 @@ function readJsonFile(filePath: string): unknown {
  * (per desktopProviderConfig.ts).
  */
 export function zcodeBundledCatalogPathForCjs(cjsPath: string): string {
-  return join(dirname(dirname(cjsPath)), "config", "provider", "zcode-builtin.json");
+  // dirname is platform-specific; pick by the input's separator style so a
+  // windows-style cjs path derives the windows result on any host.
+  const seg = cjsPath.includes("\\") ? win32 : posix;
+  return seg.join(seg.dirname(seg.dirname(cjsPath)), "config", "provider", "zcode-builtin.json");
 }
 
 /**

@@ -428,13 +428,11 @@ describe("enumerateZcodeRegistry (the registry mirror)", () => {
 
 describe("zcodeBundledCatalogPathForCjs", () => {
   it("derives <install>/resources/config/provider/zcode-builtin.json from the cjs", () => {
+    // literal expectations: the result must not depend on the host platform
     const win = zcodeBundledCatalogPathForCjs("C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs");
-    expect(win).toBe(
-      join("C:\\Program Files\\ZCode", "resources", "config", "provider", "zcode-builtin.json"),
-    );
+    expect(win).toBe("C:\\Program Files\\ZCode\\resources\\config\\provider\\zcode-builtin.json");
     const linux = zcodeBundledCatalogPathForCjs("/opt/ZCode/resources/glm/zcode.cjs");
-    expect(linux.endsWith(join("config", "provider", "zcode-builtin.json"))).toBe(true);
-    expect(dirname(dirname(dirname(linux))).replace(/\\/g, "/")).toBe("/opt/ZCode/resources");
+    expect(linux).toBe("/opt/ZCode/resources/config/provider/zcode-builtin.json");
   });
 });
 
