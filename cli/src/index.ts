@@ -707,10 +707,18 @@ function handleAgents(): void {
     const status = a.available
       ? a.unsupported
         ? "⚠ (unsupported)"
-        : "✓"
+        : a.ready === false
+          ? "⚠ (installed · not ready)"
+          : "✓"
       : "✗";
     const isDefault = a.id === config.defaultAgent ? " (default)" : "";
     console.log(`  ${status} ${a.id} — ${a.label} (${a.vendor})${isDefault}`);
+    // ZCode installed is not the same as ready; print the guidance line too.
+    if (a.available && a.ready === false) {
+      console.log(
+        "      no usable provider: open ZCode, log in or add a model provider, then re-run",
+      );
+    }
   }
 }
 

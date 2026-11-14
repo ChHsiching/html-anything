@@ -20,6 +20,15 @@ export class UnsupportedAgentProtocolError extends Error {
   }
 }
 
+/**
+ * The fixed short guide ZCode's `-p` flag carries. The attachment holds the
+ * real task, so this only points the model at it and pins the deliverable
+ * shape (final HTML as the reply body; ZCode is agentic and would otherwise
+ * reach for file-write tools). Keep it short: `-p` takes an argv value.
+ */
+const ZCODE_PROMPT_GUIDE =
+  "附件是完整的任务说明。请严格按其中的要求执行，并将最终结果（完整 HTML）直接作为你的回复正文输出。";
+
 export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
   const { model } = _opts;
   switch (agent) {
@@ -126,6 +135,22 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
       // there's no `-` stdin sentinel. invoke.ts appends opts.prompt at
       // spawn time, so we leave the trailing slot empty here.
       return ["exec", "--auto", ...(model ? ["--model", model] : [])];
+    case "zcode":
+      // Headless one-shot. `-p` carries only this fixed short guide; the
+      // full prompt (shared directives + template + user content, 20-30KB+)
+      // travels in the `--attach` temp file invoke.ts writes, since argv
+      // length limits would truncate it. `--mode yolo` is `-p`'s default
+      // anyway; passing it is self-documentation. There is no `--model`
+      // flag: the model default comes from ZCode's own provider config
+      // (opts.model is deliberately ignored).
+      return [
+        "-p",
+        ZCODE_PROMPT_GUIDE,
+        "--output-format",
+        "stream-json",
+        "--mode",
+        "yolo",
+      ];
     case "hermes":
     case "kimi":
     case "devin":
@@ -143,6 +168,12 @@ export function buildArgv(agent: string, _opts: AgentArgvOpts = {}): string[] {
 export function envFor(agent: string): NodeJS.ProcessEnv {
   const base = { ...process.env };
   if (agent === "gemini") base.GEMINI_CLI_TRUST_WORKSPACE = "true";
+  // ZCode's zcode.cjs is an Electron-hosted bundle; without
+  // ELECTRON_RUN_AS_NODE=1 it boots the full Electron app rather than the CLI
+  // and the prompt is never executed (verified). Merged into the env (not
+  // a replacement) so PATH, ZCODE_*, and the provider-config escape-hatch
+  // vars survive. Scoped to zcode; other agents must not inherit it.
+  if (agent === "zcode") base.ELECTRON_RUN_AS_NODE = "1";
   return base;
 }
 
@@ -169,12 +200,19 @@ export type AgentParse =
    * real HTML. Downstream calls `setHtmlFor`, not `appendHtmlFor`.
    */
   | { kind: "html"; text: string }
+  /**
+   * Turn-level failure surfaced by the stream itself (e.g. ZCode's
+   * `turn.failed` event). Carries the human-readable message only; the invoke
+   * layer forwards it as `{type:"error"}` so the consumer-side failure gate
+   * (red error state) can fire on it.
+   */
+  | { kind: "error"; message: string }
   | { kind: "noise" };
 
 /**
  * Cross-line state that the parser carries between calls. Currently used to
  * dedupe text deltas: when an agent emits both fine-grained `stream_event`
- * `text_delta` blocks AND a final `assistant` message containing the same
+ * `text_delta` blocks and a final `assistant` message containing the same
  * text concatenated, we keep the streamed tokens and skip the assistant
  * message body. Without this dedupe, every Claude/Cursor/Gemini/Qoder run
  * with `--include-partial-messages` (or the equivalent) writes its output
@@ -187,11 +225,19 @@ export type ParseState = {
   opencodeAccumulatedCacheReadTokens?: number;
   opencodeAccumulatedCacheWriteTokens?: number;
   opencodeAccumulatedCost?: number;
+  /**
+   * ZCode: toolCallId → toolName, filled when the `model.streaming`
+   * tool_call event names the tool. `tool.updated` result events carry only a
+   * toolCallId, so the "工具 X 完成" status line resolves the name through
+   * this map; a result whose id maps to nothing emits no line at all
+   * (a nameless status line is noise).
+   */
+  zcodeToolNamesById?: Map<string, string>;
 };
 
 /**
  * Build a stateful per-invocation parser. Feed every stdout line through the
- * returned function — it carries the cross-line state needed for dedupe.
+ * returned function; it holds the cross-line state needed for dedupe.
  */
 export function makeParser(agent: string): (line: string) => AgentParse[] {
   const state: ParseState = {};
@@ -214,6 +260,10 @@ export function parseLine(agent: string, line: string): AgentParse[] {
  * Rescue the HTML from the tool_use input so the preview still gets the real
  * content. Returns an empty string if no Write/create_file tool_use was found
  * or its input has no usable content field.
+ *
+ * Module-internal: shared by the agent parse cases below. (The cli mirror
+ * keeps its own internal copy; the two files are adapted copies by repo
+ * convention, not verbatim mirrors.)
  */
 function rescueHtmlFromToolUse(
   content: Array<{ type?: string; name?: string; input?: unknown }> | undefined,
@@ -252,6 +302,123 @@ function rescueHtmlFromToolUse(
   return parts.join("");
 }
 
+/**
+ * ZCode CLI one-shot (`-p --output-format stream-json`) stdout, one NDJSON
+ * event envelope per line:
+ *
+ *   {"eventId":…,"payload":{…},"seq":…,"sessionId":…,"timestamp":…,"type":"model.streaming"}
+ *
+ * Events that produce output, dispatched on `type` (set pinned in the
+ * ZCode open-source contracts,
+ * apps/zcode-cli/packages/contracts/src/events/session.events.ts):
+ *  - `model.streaming`, dispatched on `payload.kind`: text_delta → delta;
+ *    reasoning_delta → thinking meta (same `thinking` key as the Claude
+ *    path); tool_call → rescue a file-write tool's input HTML, else a status
+ *    line (records toolCallId→toolName for the nameless result event); the
+ *    start/end/finish kinds emit nothing.
+ *  - `tool.updated`, only kind `result`: "工具 X 完成" with the name resolved
+ *    via the tool_call map.
+ *  - `turn.completed`: usage (snake_case remap), duration, resultType; the
+ *    only place usage is emitted.
+ *  - `turn.failed` → error part. `result` → bare terminator (sessionId meta;
+ *    its usage repeats turn.completed and is not re-emitted).
+ *
+ * Everything else (session.titleUpdated / session.resumed / session.updated
+ * plugin-hook frames, turn.started, message.upserted, permission /
+ * checkpoint families, …) is noise and dropped; so are non-JSON lines (ZCode
+ * plugins can print arbitrary stdout).
+ */
+function parseZcodeLine(line: string, state: ParseState): AgentParse[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const obj = parsed as Record<string, unknown>;
+  const payload = obj.payload && typeof obj.payload === "object" ? (obj.payload as Record<string, unknown>) : null;
+
+  if (obj.type === "model.streaming" && payload) {
+    const kind = typeof payload.kind === "string" ? payload.kind : "";
+    if (kind === "text_delta" || kind === "reasoning_delta") {
+      const delta = typeof payload.delta === "string" ? payload.delta : "";
+      if (delta.length === 0) return [];
+      return [
+        kind === "text_delta"
+          ? { kind: "delta", text: delta }
+          : { kind: "meta", key: "thinking", value: delta },
+      ];
+    }
+    if (kind === "tool_call") {
+      const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+      const name = typeof payload.toolName === "string" ? payload.toolName : "";
+      if (id && name) {
+        (state.zcodeToolNamesById ??= new Map()).set(id, name);
+      }
+      // A file-write tool call may hold the generated HTML; reuse the same
+      // rescue logic the other adapters apply to Claude-style tool_use
+      // blocks (ZCode's Write tool is {file_path, content}, same shape).
+      const html = rescueHtmlFromToolUse([{ type: "tool_use", name, input: payload.input }]);
+      if (html) return [{ kind: "html", text: html }];
+      if (name) return [{ kind: "meta", key: "status", value: `调用工具 ${name}` }];
+    }
+    return [];
+  }
+
+  if (obj.type === "tool.updated" && payload) {
+    if (payload.kind === "result") {
+      const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+      const name = (id && state.zcodeToolNamesById?.get(id)) || "";
+      if (name) return [{ kind: "meta", key: "status", value: `工具 ${name} 完成` }];
+    }
+    return [];
+  }
+
+  if (obj.type === "turn.completed" && payload) {
+    const out: AgentParse[] = [];
+    const usage = mapZcodeUsage(payload.usage);
+    if (usage) out.push({ kind: "meta", key: "usage", value: usage });
+    if (typeof payload.duration === "number") {
+      out.push({ kind: "meta", key: "duration_ms", value: payload.duration });
+    }
+    if (typeof payload.resultType === "string") {
+      out.push({ kind: "meta", key: "result", value: payload.resultType });
+    }
+    return out;
+  }
+
+  if (obj.type === "turn.failed") {
+    const err = payload && typeof payload.error === "object" ? (payload.error as Record<string, unknown>) : null;
+    const message =
+      err && typeof err.message === "string" && err.message.length > 0 ? err.message : "zcode turn failed";
+    return [{ kind: "error", message }];
+  }
+
+  if (obj.type === "result") {
+    if (typeof obj.sessionId === "string" && obj.sessionId.length > 0) {
+      return [{ kind: "meta", key: "session", value: obj.sessionId }];
+    }
+    return [];
+  }
+
+  return [];
+}
+
+/** ZCode usage (camelCase) → the snake_case keys the consumer layer reads
+ * (same key set Claude's `result.usage` carries: input_tokens /
+ * output_tokens / cache_read_input_tokens / cache_creation_input_tokens). */
+function mapZcodeUsage(usage: unknown): Record<string, number> | null {
+  if (!usage || typeof usage !== "object") return null;
+  const u = usage as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  if (typeof u.inputTokens === "number") out.input_tokens = u.inputTokens;
+  if (typeof u.outputTokens === "number") out.output_tokens = u.outputTokens;
+  if (typeof u.cacheReadTokens === "number") out.cache_read_input_tokens = u.cacheReadTokens;
+  if (typeof u.cacheWriteTokens === "number") out.cache_creation_input_tokens = u.cacheWriteTokens;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function parseLineWithState(agent: string, line: string, state: ParseState): AgentParse[] {
   const trimmed = line.trim();
   if (!trimmed) return [];
@@ -260,6 +427,16 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
   // go to stderr, which is forwarded as `stderr` events, not parsed here).
   if (agent === "aider" || agent === "codewhale" || agent === "deepseek-tui") {
     return [{ kind: "delta", text: trimmed.endsWith("\n") ? trimmed : trimmed + "\n" }];
+  }
+
+  // ZCode (argv-attach), NDJSON event envelope, one JSON object per line:
+  //   {"type":"model.streaming","payload":{"kind":"text_delta","delta":"…"},…}
+  // plus a bare {"type":"result",…} terminator line. See parseZcodeLine for
+  // the full event set. Handled before the shared JSON.parse so a
+  // non-JSON line returns [] here rather than a `noise` part (the invoke
+  // layer forwards noise as `raw`, which would flood the log panel).
+  if (agent === "zcode") {
+    return parseZcodeLine(trimmed, state);
   }
 
   let parsed: unknown;

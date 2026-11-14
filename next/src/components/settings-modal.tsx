@@ -10,6 +10,7 @@ import {
 } from "@/lib/store";
 import { useT, type DictKey } from "@/lib/i18n";
 import { refreshTemplates } from "@/lib/templates";
+import { isStaleModelChoice, resolveAgentModel } from "@/lib/agent-models";
 
 type Props = { onClose: () => void; initialSection?: SectionId };
 
@@ -32,6 +33,7 @@ const PROTOCOL_KEY: Record<AgentInfo["protocol"], { key: DictKey; tone: "ok" | "
   "argv-message": { key: "protocol.argvMessage", tone: "ok" },
   acp: { key: "protocol.acp", tone: "warn" },
   "pi-rpc": { key: "protocol.piRpc", tone: "warn" },
+  "argv-attach": { key: "protocol.argvAttach", tone: "ok" },
 };
 
 const VENDOR_GRADIENT: Record<string, string> = {
@@ -53,6 +55,7 @@ const VENDOR_GRADIENT: Record<string, string> = {
   Kilo: "from-[#16a34a] to-[#0d9488]",
   Mistral: "from-[#fb923c] to-[#ef4444]",
   Qoder: "from-[#0891b2] to-[#7c3aed]",
+  "Z.AI": "from-[#3b5bfd] to-[#9d7bff]",
 };
 
 export function SettingsModal({ onClose, initialSection = "agent" }: Props) {
@@ -184,14 +187,25 @@ function AgentSection() {
   };
 
   useEffect(() => {
-    if (!agents.length) load();
+    // Refresh on every mount: ZCode's plan chips and readiness change
+    // with the GUI state, so a list cached from a previous mount would be
+    // stale (the same reasoning as the not-ready amber state).
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const installed = useMemo(() => agents.filter((a) => a.available), [agents]);
   const missing = useMemo(() => agents.filter((a) => !a.available), [agents]);
   const selectedAgent = installed.find((a) => a.id === selected);
-  const selectedModelId = selected ? agentModels[selected] ?? "default" : "default";
+  // Resolve the persisted pick against the (freshly scanned) list: a
+  // stale id renders Default active and shows the revert notice, and is never
+  // sent to the agent.
+  const selectedModelId = selected
+    ? resolveAgentModel(selectedAgent?.models, agentModels[selected])
+    : "default";
+  const staleModelPick = selectedAgent
+    ? isStaleModelChoice(selectedAgent.models, agentModels[selectedAgent.id])
+    : false;
 
   return (
     <div>
@@ -242,6 +256,7 @@ function AgentSection() {
         <ModelPicker
           agent={selectedAgent}
           modelId={selectedModelId}
+          stalePick={staleModelPick}
           onPick={(id) => setAgentModel(selectedAgent.id, id)}
         />
       )}
@@ -349,11 +364,18 @@ function AgentCard({
   const t = useT();
   const proto = PROTOCOL_KEY[agent.protocol];
   const gradient = VENDOR_GRADIENT[agent.vendor] ?? "from-[var(--ink)] to-[var(--ink-soft)]";
+  // Installed is not the same as ready (ZCode). Amber ring + badge +
+  // one-line guidance, so the user learns it without hitting Generate.
+  const notReady = agent.available && agent.ready === false;
   return (
     <button
       onClick={onClick}
       className={`group relative flex items-start gap-3 rounded-2xl p-4 text-left transition-all ${
-        selected ? "ring-2 ring-[var(--coral)]" : "ring-1 ring-[var(--line-soft)] hover:ring-[var(--ink)]/30"
+        notReady
+          ? "ring-2 ring-[var(--amber)]"
+          : selected
+            ? "ring-2 ring-[var(--coral)]"
+            : "ring-1 ring-[var(--line-soft)] hover:ring-[var(--ink)]/30"
       }`}
       style={{ background: "var(--surface)" }}
     >
@@ -370,12 +392,22 @@ function AgentCard({
               {t("agent.selected")}
             </span>
           )}
+          {notReady && (
+            <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--amber)] shrink-0">
+              {t("agent.notReady")}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 text-[11px] text-[var(--ink-faint)] mt-0.5">
           <span>{agent.vendor}</span>
           <span>·</span>
           <span className={proto.tone === "warn" ? "text-[var(--coral)]" : ""}>{t(proto.key)}</span>
         </div>
+        {notReady && agent.notReadyReason && (
+          <div className="text-[11px] leading-snug text-[var(--amber)] mt-1.5">
+            {t("agent.notReady.noUsableProvider")}
+          </div>
+        )}
         {agent.path && (
           <div
             className="font-mono text-[10px] text-[var(--ink-mute)] mt-1.5 truncate"
@@ -392,10 +424,13 @@ function AgentCard({
 function ModelPicker({
   agent,
   modelId,
+  stalePick = false,
   onPick,
 }: {
   agent: AgentInfo;
   modelId: string;
+  /** The persisted pick is gone from the list; render the revert notice. */
+  stalePick?: boolean;
   onPick: (id: string) => void;
 }) {
   const t = useT();
@@ -419,13 +454,26 @@ function ModelPicker({
           </div>
         </div>
         <div className="text-[10.5px] text-[var(--ink-mute)] max-w-[220px] text-right leading-snug">
-          {t("model.defaultHint.prefix")}
-          <code className="px-1 rounded bg-[var(--surface)] border border-[var(--line-faint)]">
-            --model
-          </code>
-          {t("model.defaultHint.suffix")}
+          {agent.protocol === "argv-attach" ? (
+            // ZCode has no --model flag, so the hint must be truthful
+            // about what Default does, not describe the sibling CLIs' flag.
+            t("model.defaultHint.zcode")
+          ) : (
+            <>
+              {t("model.defaultHint.prefix")}
+              <code className="px-1 rounded bg-[var(--surface)] border border-[var(--line-faint)]">
+                --model
+              </code>
+              {t("model.defaultHint.suffix")}
+            </>
+          )}
         </div>
       </div>
+      {stalePick && (
+        <div className="mb-2 -mt-1 text-[11px] leading-snug text-[var(--amber)]">
+          {t("model.staleNotice")}
+        </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {models.map((m) => {
           const active = m.id === modelId;
@@ -831,8 +879,8 @@ function MarketplaceSection() {
         }),
       );
       // Drop the in-memory template registry cache AND push the fresh list
-      // to every mounted `useTemplates` consumer — the picker switches over
-      // immediately, no page reload. Failing here just means the picker
+      // to every mounted `useTemplates` consumer, so the picker switches over
+      // immediately with no page reload. Failing here just means the picker
       // keeps the previous list; the install itself already succeeded.
       await refreshTemplates().catch(() => undefined);
       await load();

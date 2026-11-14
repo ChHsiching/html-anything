@@ -5,7 +5,13 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { deleteTaskRuns, putRun } from "@/lib/history/db";
 
-export type ModelOption = { id: string; label: string };
+/**
+ * A model picker entry. Mirrors the server-side ModelOption in
+ * `lib/agents/detect.ts`. `providerId` is ZCode-only: the plan chips
+ * carry the GUI-selected plan's catalog provider for the per-turn binding.
+ * Absent for every other agent.
+ */
+export type ModelOption = { id: string; label: string; providerId?: string };
 
 export type AgentInfo = {
   id: string;
@@ -14,11 +20,19 @@ export type AgentInfo = {
   available: boolean;
   path?: string;
   /** UI uses this to badge unsupported / batch adapters. Mirrors AgentProtocol on the server. */
-  protocol: "stdin" | "argv" | "argv-message" | "acp" | "pi-rpc";
+  protocol: "stdin" | "argv" | "argv-message" | "argv-attach" | "acp" | "pi-rpc";
   /** Curated model list for the picker. Always begins with `default`. */
   models: ModelOption[];
   /** True for ACP / pi-rpc adapters where Convert returns a friendly error. */
   unsupported?: boolean;
+  /**
+   * ZCode-only: installed is not the same as ready. True when the registry
+   * mirror holds at least one usable provider (a paired Coding Plan or a
+   * keyed personal provider). False + notReadyReason renders the amber
+   * "已安装 · 未就绪" card state. Absent for every other agent.
+   */
+  ready?: boolean;
+  notReadyReason?: import("./agents/zcode-model-binding").ZcodeNotReadyReason;
 };
 
 export type ConvertStatus = "idle" | "running" | "done" | "error";
@@ -71,9 +85,9 @@ export type Task = {
   status: ConvertStatus;
   log: LogEntry[];
   stats: RunStats;
-  // sample-derived fields — when populated, the next convert switches to
+  // sample-derived fields: when populated, the next convert switches to
   // diff-edit mode and asks the agent to make minimal changes to baseHtml
-  // instead of regenerating from scratch.
+  // rather than regenerating from scratch.
   baseContent?: string;
   baseHtml?: string;
   /** id of the source sample (if any), so the gallery can mark it loaded */

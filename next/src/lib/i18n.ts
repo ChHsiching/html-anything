@@ -69,11 +69,15 @@ export interface Dict {
   "model.label": string;
   "model.defaultHint.prefix": string;
   "model.defaultHint.suffix": string;
+  "model.defaultHint.zcode": string;
   "model.defaultLabel": string;
+  "model.staleNotice": string;
 
   // Agent card
   "agent.selected": string;
   "agent.notInstalled": string;
+  "agent.notReady": string;
+  "agent.notReady.noUsableProvider": string;
   "agent.customBin.eyebrow": string;
   "agent.customBin.subtitle": string;
   "agent.customBin.detected": string;
@@ -85,6 +89,7 @@ export interface Dict {
   "protocol.argvMessage": string;
   "protocol.acp": string;
   "protocol.piRpc": string;
+  "protocol.argvAttach": string;
 
   // Settings modal
   "settings.eyebrow": string;
@@ -429,10 +434,15 @@ const en: Dict = {
   "model.label": "Pick a model for {agent}",
   "model.defaultHint.prefix": "Default omits ",
   "model.defaultHint.suffix": " and lets the CLI pick.",
+  "model.defaultHint.zcode": "Default uses the first model in the list.",
   "model.defaultLabel": "Default (CLI config)",
+  "model.staleNotice": "The saved model is no longer in this agent's list; reverted to Default.",
 
   "agent.selected": "Selected",
   "agent.notInstalled": "Not installed",
+  "agent.notReady": "Installed · not ready",
+  "agent.notReady.noUsableProvider":
+    "ZCode has no usable model provider yet. Open ZCode, log in or add a model provider, then rescan.",
   "agent.customBin.eyebrow": "custom path",
   "agent.customBin.subtitle": "Override the auto-detected binary for {agent}",
   "agent.customBin.detected": "Auto-detected:",
@@ -445,6 +455,7 @@ const en: Dict = {
   "protocol.argvMessage": "argv · batch JSON",
   "protocol.acp": "ACP JSON-RPC · not wired",
   "protocol.piRpc": "pi-rpc · not wired",
+  "protocol.argvAttach": "argv-attach · stream-json",
 
   "settings.eyebrow": "Settings",
   "settings.titlePart1": "Configure",
@@ -791,10 +802,15 @@ const zhCN: Dict = {
   "model.label": "为 {agent} 选个模型",
   "model.defaultHint.prefix": "选 Default 时不传 ",
   "model.defaultHint.suffix": ", 由 CLI 自己挑",
+  "model.defaultHint.zcode": "选 Default 时用列表里的第一个模型。",
   "model.defaultLabel": "Default (CLI config)",
+  "model.staleNotice": "保存的模型已不在该 agent 列表中，已回退为 Default。",
 
   "agent.selected": "SELECTED",
   "agent.notInstalled": "未安装",
+  "agent.notReady": "已安装 · 未就绪",
+  "agent.notReady.noUsableProvider":
+    "ZCode 里还没有可用的模型服务。打开 ZCode 登录或添加一个模型 provider，然后重新扫描。",
   "agent.customBin.eyebrow": "自定义路径",
   "agent.customBin.subtitle": "手动指定 {agent} 的二进制路径",
   "agent.customBin.detected": "自动检测到:",
@@ -806,6 +822,7 @@ const zhCN: Dict = {
   "protocol.argvMessage": "argv · 整段 JSON",
   "protocol.acp": "ACP JSON-RPC · 暂未接入",
   "protocol.piRpc": "pi-rpc · 暂未接入",
+  "protocol.argvAttach": "argv-attach · stream-json",
 
   "settings.eyebrow": "设置",
   "settings.titlePart1": "配置",
