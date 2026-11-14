@@ -512,18 +512,6 @@ Thanks to everyone who has filed an issue, opened a PR, or added a skill / agent
 
 If you've shipped your first PR — welcome. The [`good-first-issue` / `help-wanted`](https://github.com/ChHsiching/html-anything/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22%2C%22help+wanted%22) labels are the entry point.
 
-## Star History
-
-<a href="https://star-history.dera.page/#ChHsiching/html-anything&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
-    <img alt="HTML Anything star history" src="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
-  </picture>
-</a>
-
-If the curve bends up, that's the signal we look for. ★ this repo to push it.
-
 ## License
 
 Apache-2.0 © 2026 HTML Anything contributors. See [`LICENSE`](LICENSE).

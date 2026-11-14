@@ -395,18 +395,6 @@ picker 用两个维度组织：
 
 如果你刚刚开第一个 PR —— 欢迎。[`good-first-issue` / `help-wanted`](https://github.com/ChHsiching/html-anything/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22%2C%22help+wanted%22) 标签是最好的切入口。
 
-## ⭐ Star History
-
-<a href="https://star-history.dera.page/#ChHsiching/html-anything&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
-    <img alt="HTML Anything star history" src="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
-  </picture>
-</a>
-
-曲线往上翘,就是我们要找的信号。点个 ★ 推一把。
-
 ## 📄 License
 
 Apache-2.0 © 2026 HTML Anything 贡献者。详见 [`LICENSE`](LICENSE)。
