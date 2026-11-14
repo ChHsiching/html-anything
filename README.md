@@ -482,6 +482,8 @@ Full walkthrough, bar-for-merging, code style, and what we **don't** accept → 
 
 ## References & lineage
 
+HTML Anything is actively maintained here. The upstream repository deleted this application in November 2026. Its former location now hosts an unrelated product, not a newer version of this project. The original code is licensed under Apache 2.0 and its copyright remains with the original authors. Changes in this repository are maintained by ChHsiching.
+
 Every external project this repo borrows from — what we take from each, and where it lands in the tree.
 
 | Project | Role here |
