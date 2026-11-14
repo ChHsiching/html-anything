@@ -18,14 +18,14 @@
 | 加功能、修 bug、重构流式 parser | 代码 | `src/app/`, `src/lib/`, `src/components/` | 常规 PR |
 | 改文档、把某一段翻译到另一种语言、修错别字 | 文档 | `README.md`, `README.zh-CN.md`, 本文 | 一个 PR |
 
-不确定自己的想法属于哪一类？[先开个 issue](https://github.com/nexu-io/html-anything/issues/new)，我们帮你定位到对应的目录。
+不确定自己的想法属于哪一类？[先开个 issue](https://github.com/ChHsiching/html-anything/issues/new)，我们帮你定位到对应的目录。
 
 ---
 
 ## 本地开发
 
 ```bash
-git clone https://github.com/nexu-io/html-anything.git
+git clone https://github.com/ChHsiching/html-anything.git
 cd html-anything
 pnpm install
 pnpm dev                  # next dev — http://localhost:3000
@@ -200,7 +200,7 @@ prompt 栈相关的 bug（"agent 输出了紫色渐变 hero，`SKILL.md` 里明�
 
 ## 提问
 
-- 架构问题、设计问题、"这算 bug 还是误用" → [GitHub Discussions](https://github.com/nexu-io/html-anything/discussions)（首选 —— 下一个遇到同样问题的人能搜到）。
+- 架构问题、设计问题、"这算 bug 还是误用" → [GitHub Discussions](https://github.com/ChHsiching/html-anything/discussions)（首选 —— 下一个遇到同样问题的人能搜到）。
 - "怎么写一个做 X 的 skill" → 开 discussion。我们回答之后，如果这是一个新的 pattern，会把答案沉淀进这份文档。
 
 ---

@@ -1,9 +1,5 @@
 # HTML Anything
 
-<p align="center"><sub>From the team behind <a href="https://github.com/nexu-io/open-design"><b>Open Design</b></a> — <b>40k★ · 200+ contributors</b>, production-grade and iterating faster. html-anything is the focused agent-era HTML editor; if it clicks for you, <a href="https://github.com/nexu-io/open-design">Open Design</a> is where the same team ships at scale.</sub></p>
-
-<p align="center"><b>Live page:</b> <a href="https://open-design.ai/html-anything/"><b>open-design.ai/html-anything/</b></a> — overview, surface modes, and showcase before you clone.</p>
-
 > **Markdown is the draft. HTML is what humans read. Your local agent writes it.** The agentic HTML editor — in the agentic era, you don't hand-edit docs anymore, so the output format should be what the reader actually wants: HTML. Local-first, zero API key, reuses the CLI session you already have logged in — **9 coding-agent CLIs** auto-detected on your `PATH` (Claude Code · Cursor Agent · Codex · Gemini CLI · GitHub Copilot CLI · OpenCode · Qwen Coder · Aider · IBM Bob), driven by **75 composable skill templates** across **9 deliverable surfaces** (magazine articles · keynote decks · résumés · posters · Xiaohongshu cards · tweet cards · web prototypes · data reports · Hyperframes videos). One-click export to WeChat / X / Zhihu, or download `.html` / `.png`.
 
 <p align="center">
@@ -17,16 +13,7 @@
   <a href="#export-targets"><img alt="Export" src="https://img.shields.io/badge/export-WeChat%20%C2%B7%20X%20%C2%B7%20Zhihu%20%C2%B7%20PNG-9b59b6?style=flat-square" /></a>
   <a href="#quickstart"><img alt="Quickstart" src="https://img.shields.io/badge/quickstart-30%20seconds-green?style=flat-square" /></a>
   <a href="#architecture"><img alt="No API key" src="https://img.shields.io/badge/no-API%20key%20required-ff6b35?style=flat-square" /></a>
-</p>
-
-<!-- This project is built on top of nexu-io/open-design — the badges below link to its community channels on purpose. -->
-<p align="center">
-  <a href="https://discord.gg/keeVPMrueT"><img alt="Discord (html-anything)" src="https://img.shields.io/badge/discord-html--anything-5865f2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://x.com/nexudotio"><img alt="Follow @nexudotio on X" src="https://img.shields.io/badge/follow-%40nexudotio-000000?style=flat-square&logo=x&logoColor=white" /></a>
-  <a href="https://github.com/nexu-io/open-design/releases/latest"><img alt="open-design release" src="https://img.shields.io/github/v/release/nexu-io/open-design?style=flat-square&label=release&color=8e44ad" /></a>
-  <a href="https://github.com/nexu-io/open-design/graphs/commit-activity"><img alt="open-design commits / month" src="https://img.shields.io/github/commit-activity/m/nexu-io/open-design?style=flat-square&label=commits%2Fmonth&color=f39c12" /></a>
   <a href="#showcase"><img alt="Design systems" src="https://img.shields.io/badge/design%20systems-9-1abc9c?style=flat-square" /></a>
-  <a href="https://github.com/nexu-io/open-design"><img alt="Built on open-design" src="https://img.shields.io/badge/built%20on-nexu--io%2Fopen--design-ff7043?style=flat-square&logo=github&logoColor=white" /></a>
 </p>
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></p>
@@ -157,7 +144,7 @@ We stand on four open-source shoulders:
 ## Quickstart
 
 ```bash
-git clone https://github.com/nexu-io/html-anything
+git clone https://github.com/ChHsiching/html-anything
 cd html-anything
 pnpm install
 pnpm -F @html-anything/next dev
@@ -515,27 +502,23 @@ Every external project this repo borrows from — what we take from each, and wh
 
 Each bundled upstream skill retains its original LICENSE and authorship inside its own `next/src/lib/templates/skills/<skill>/` folder.
 
-## Stay in the loop
-
-Follow [**@nexudotio**](https://x.com/nexudotio) on X for release notes, new skills, and the occasional behind-the-scenes thread on what's shipping next. The [HTML Anything Discord channel](https://discord.gg/keeVPMrueT) is where demos, template requests, export/debugging questions, and bigger community conversations happen — run by the upstream `open-design` team.
-
 ## Contributors
 
 Thanks to everyone who has filed an issue, opened a PR, or added a skill / agent adapter / export target. Every real contribution counts, and the wall below is the easiest way to say so out loud.
 
-<a href="https://github.com/nexu-io/html-anything/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=nexu-io/html-anything" alt="HTML Anything contributors" />
+<a href="https://github.com/ChHsiching/html-anything/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=ChHsiching/html-anything" alt="HTML Anything contributors" />
 </a>
 
-If you've shipped your first PR — welcome. The [`good-first-issue` / `help-wanted`](https://github.com/nexu-io/html-anything/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22%2C%22help+wanted%22) labels are the entry point.
+If you've shipped your first PR — welcome. The [`good-first-issue` / `help-wanted`](https://github.com/ChHsiching/html-anything/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22%2C%22help+wanted%22) labels are the entry point.
 
 ## Star History
 
-<a href="https://star-history.dera.page/#nexu-io/html-anything&Date">
+<a href="https://star-history.dera.page/#ChHsiching/html-anything&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=nexu-io/html-anything&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=nexu-io/html-anything&type=Date" />
-    <img alt="HTML Anything star history" src="https://star-history.dera.page/svg?repos=nexu-io/html-anything&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
+    <img alt="HTML Anything star history" src="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
   </picture>
 </a>
 

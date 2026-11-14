@@ -1,9 +1,5 @@
 # HTML Anything
 
-<p align="center"><sub>来自 <a href="https://github.com/nexu-io/open-design"><b>Open Design</b></a> 团队 —— <b>40k★ · 200+ 贡献者</b>,更生产级、迭代更快。html-anything 是聚焦在 agent 时代 HTML 编辑器这一刀的专项; 如果你喜欢这个味道, 同一拨人做的 <a href="https://github.com/nexu-io/open-design">Open Design</a> 是它在更大规模上的形态, 顺手也看看。</sub></p>
-
-<p align="center"><b>项目主页:</b> <a href="https://open-design.ai/html-anything/"><b>open-design.ai/html-anything/</b></a> —— 不用 clone 也能先看看 HTML Anything 长什么样、能干啥。</p>
-
 > **Markdown 是草稿, HTML 才是给人读的成品 —— 让本地 agent 直接写 HTML。** Agent 时代的 HTML 编辑器 —— 既然你已经不亲手改文档、全都让 Claude 改了, 那 agent 的输出就该是读者真正想看的 HTML, 而不是中间态的 markdown。本地优先、零 API Key、复用你已经登录好的 CLI session —— **9 个 coding-agent CLI** 在 `PATH` 上自动识别（Claude Code · Cursor Agent · Codex · Gemini CLI · GitHub Copilot CLI · OpenCode · Qwen Coder · Aider · IBM Bob），驱动 **75 套 skill 模板** 和 **9 类可交付场景**（杂志文章 · Keynote PPT · 简历 · 海报 · 小红书 · 推特卡 · Web 原型 · 数据报告 · Hyperframes 视频）。一键复制到公众号 / 推特 / 知乎，或者下载 `.html` / `.png`。
 
 <p align="center">
@@ -17,16 +13,7 @@
   <a href="#一键发布到平台"><img alt="Export" src="https://img.shields.io/badge/export-WeChat%20%C2%B7%20X%20%C2%B7%20Zhihu%20%C2%B7%20PNG-9b59b6?style=flat-square" /></a>
   <a href="#-30-秒上手"><img alt="Quickstart" src="https://img.shields.io/badge/quickstart-30%20seconds-green?style=flat-square" /></a>
   <a href="#架构"><img alt="No API key" src="https://img.shields.io/badge/no-API%20key%20required-ff6b35?style=flat-square" /></a>
-</p>
-
-<!-- 本项目站在 nexu-io/open-design 的肩膀上 — 下面这一行的社群标签都指向它,顺道带流量。 -->
-<p align="center">
-  <a href="https://discord.gg/keeVPMrueT"><img alt="Discord（html-anything）" src="https://img.shields.io/badge/discord-html--anything-5865f2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://x.com/nexudotio"><img alt="X 关注 @nexudotio" src="https://img.shields.io/badge/follow-%40nexudotio-000000?style=flat-square&logo=x&logoColor=white" /></a>
-  <a href="https://github.com/nexu-io/open-design/releases/latest"><img alt="open-design 最新版本" src="https://img.shields.io/github/v/release/nexu-io/open-design?style=flat-square&label=release&color=8e44ad" /></a>
-  <a href="https://github.com/nexu-io/open-design/graphs/commit-activity"><img alt="open-design 月提交数" src="https://img.shields.io/github/commit-activity/m/nexu-io/open-design?style=flat-square&label=commits%2Fmonth&color=f39c12" /></a>
   <a href="#-看看效果"><img alt="设计系统" src="https://img.shields.io/badge/design%20systems-9-1abc9c?style=flat-square" /></a>
-  <a href="https://github.com/nexu-io/open-design"><img alt="基于 open-design" src="https://img.shields.io/badge/built%20on-nexu--io%2Fopen--design-ff7043?style=flat-square&logo=github&logoColor=white" /></a>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <b>简体中文</b></p>
@@ -157,7 +144,7 @@ picker 顶部 **推荐 / Featured** 分组里默认置顶的 8 个 skill —— 
 ## ⚡ 30 秒上手
 
 ```bash
-git clone https://github.com/nexu-io/html-anything
+git clone https://github.com/ChHsiching/html-anything
 cd html-anything
 pnpm install
 pnpm -F @html-anything/next dev
@@ -398,27 +385,23 @@ picker 用两个维度组织：
 
 每一个 vendor 进来的 upstream skill 都在 `next/src/lib/templates/skills/<skill>/` 里保留了原始 LICENSE 和作者署名。
 
-## 📣 关注我们
-
-X 上关注 [**@nexudotio**](https://x.com/nexudotio),看版本发布、新 skill、新 design system,以及偶尔的 behind-the-scenes 线程。[HTML Anything Discord 频道](https://discord.gg/keeVPMrueT) 用来展示 demo、提模板需求、排查导出/agent 问题,也承接更长篇的社区讨论 —— 由上游 `open-design` 团队维护。
-
 ## 👥 贡献者
 
 感谢每一个提 issue、开 PR、加 skill / agent 适配 / 导出适配的人。下面这面墙是我们能想到最直观的感谢方式。
 
-<a href="https://github.com/nexu-io/html-anything/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=nexu-io/html-anything" alt="HTML Anything 贡献者" />
+<a href="https://github.com/ChHsiching/html-anything/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=ChHsiching/html-anything" alt="HTML Anything 贡献者" />
 </a>
 
-如果你刚刚开第一个 PR —— 欢迎。[`good-first-issue` / `help-wanted`](https://github.com/nexu-io/html-anything/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22%2C%22help+wanted%22) 标签是最好的切入口。
+如果你刚刚开第一个 PR —— 欢迎。[`good-first-issue` / `help-wanted`](https://github.com/ChHsiching/html-anything/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22%2C%22help+wanted%22) 标签是最好的切入口。
 
 ## ⭐ Star History
 
-<a href="https://star-history.dera.page/#nexu-io/html-anything&Date">
+<a href="https://star-history.dera.page/#ChHsiching/html-anything&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=nexu-io/html-anything&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=nexu-io/html-anything&type=Date" />
-    <img alt="HTML Anything star history" src="https://star-history.dera.page/svg?repos=nexu-io/html-anything&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
+    <img alt="HTML Anything star history" src="https://star-history.dera.page/svg?repos=ChHsiching/html-anything&type=Date" />
   </picture>
 </a>
 

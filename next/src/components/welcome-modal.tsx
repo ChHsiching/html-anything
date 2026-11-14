@@ -252,32 +252,13 @@ export function WelcomeModal({ onClose }: Props) {
           style={{ borderTop: "1px solid var(--line-faint)" }}
         >
           <a
-            href="https://github.com/nexu-io/html-anything"
+            href="https://github.com/ChHsiching/html-anything"
             target="_blank"
             rel="noreferrer noopener"
             className="rounded-full px-3 py-1 border transition-colors hover:text-[var(--ink)] hover:border-[var(--ink)]/30"
             style={{ borderColor: "var(--line)" }}
           >
             ★ GitHub
-          </a>
-          <a
-            href="https://discord.gg/keeVPMrueT"
-            target="_blank"
-            rel="noreferrer noopener"
-            className="rounded-full px-3 py-1 border transition-colors hover:text-[var(--ink)] hover:border-[var(--ink)]/30"
-            style={{ borderColor: "var(--line)" }}
-          >
-            Discord
-          </a>
-          <a
-            href="https://github.com/nexu-io/open-design"
-            target="_blank"
-            rel="noreferrer noopener"
-            className="rounded-full px-3 py-1 border transition-colors hover:text-[var(--ink)] hover:border-[var(--ink)]/30"
-            style={{ borderColor: "var(--line)" }}
-            title={t("community.upstreamHint")}
-          >
-            open-design ↗
           </a>
         </div>
 
