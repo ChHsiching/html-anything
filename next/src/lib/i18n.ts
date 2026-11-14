@@ -270,11 +270,8 @@ export interface Dict {
   "history.diff.before": string;
   "history.diff.after": string;
 
-  // Community / upstream link entry points
+  // Community link entry points
   "community.starOnGitHub": string;
-  "community.joinDiscord": string;
-  "community.upstreamHint": string;
-  "community.builtBy": string;
 
   // Export menu
   "export.button": string;
@@ -643,9 +640,6 @@ const en: Dict = {
   "history.diff.after": "After",
 
   "community.starOnGitHub": "Star on GitHub",
-  "community.joinDiscord": "Join Discord",
-  "community.upstreamHint": "The upstream design system this is built on",
-  "community.builtBy": "Built by",
 
   "export.button": "⤓ Export / Copy ▾",
   "export.section.platform": "Copy to platform",
@@ -1008,9 +1002,6 @@ const zhCN: Dict = {
   "history.diff.after": "新版本",
 
   "community.starOnGitHub": "在 GitHub 上 Star",
-  "community.joinDiscord": "加入 Discord",
-  "community.upstreamHint": "本项目所基于的上游设计系统",
-  "community.builtBy": "基于",
 
   "export.button": "⤓ 导出 / 复制 ▾",
   "export.section.platform": "复制到平台",
